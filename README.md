@@ -1,8 +1,7 @@
 Reteti
 --------------------------------------------------------------------------------
   
-Reteti is a serverless keyword search experiment based on a tokenizer and a partitioned index in object storage.  
-Work in Progress
+Reteti is a work-in-progress serverless keyword search experiment based on a tokenizer and a partitioned index in object storage.
   
 <img align="left" width="100" height="100" src="assets/fupi_svgrepo_com.png">
 
@@ -19,4 +18,4 @@ This program is licensed under the terms of the Apache License 2.0.
 
 ## Authors
 
-[Dimitar D. Mitov](https://www.linkedin.com/in/dimitar-mitov-12388982/), 2024,  
+[Dimitar D. Mitov](https://www.linkedin.com/in/dimitar-mitov-12388982/), 2024
