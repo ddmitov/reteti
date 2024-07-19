@@ -16,7 +16,12 @@ def newlines_remover(text: str) -> str:
     return text.replace('\n', ' ')
 
 
-def data_preprocessor() -> list:
+def batch_generator(item_list: list, items_per_batch: int):
+    for item in range(0, len(item_list), items_per_batch):
+        yield item_list[item:item + items_per_batch]
+
+
+def data_preprocessor(texts_per_batch_number: int) -> List[list]:
     # Download data from a Hugging Face dataset or open a locally cached copy:
     hf_hub_download(
         repo_id='CloverSearch/cc-news-mutlilingual',
@@ -33,7 +38,7 @@ def data_preprocessor() -> list:
 
     duckdb.sql('CREATE SEQUENCE text_id_maker START 1')
 
-    text_list = duckdb.sql(
+    texts_list = duckdb.sql(
         f'''
             SELECT
                 nextval('text_id_maker') AS text_id,
@@ -50,29 +55,24 @@ def data_preprocessor() -> list:
         '''
     ).to_arrow_table().to_pylist()
 
-    return text_list
+    text_batches_list = list(
+        batch_generator(
+            texts_list,
+            texts_per_batch_number
+        )
+    )
 
-
-def batch_generator(item_list: list, items_per_batch: int):
-    for item in range(0, len(item_list), items_per_batch):
-        yield item_list[item:item + items_per_batch]
+    return text_batches_list
 
 
 def main():
     # Pre-process input texts and group them in batches:
-    input_text_list = data_preprocessor()
-
-    text_batch_list = list(
-        batch_generator(
-            input_text_list,
-            TEXTS_PER_BATCH_NUMBER
-        )
-    )
+    text_batches_list = data_preprocessor(TEXTS_PER_BATCH_NUMBER)
 
     # Index all text batches:
     metadata_column_names = ['date', 'title']
 
-    reteti_batch_indexer(text_batch_list, metadata_column_names)
+    reteti_batch_indexer(text_batches_list, metadata_column_names)
 
     return True
 
