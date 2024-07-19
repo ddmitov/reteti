@@ -160,8 +160,7 @@ def main():
             with gr.Column(scale=40):
                 gr.Markdown(
                     '''
-                    **Dataset:** Common Crawl News - 2021 Bulgarian  
-                    https://commoncrawl.org/blog/news-dataset-available  
+                    **Dataset:** [Common Crawl News](https://commoncrawl.org/blog/news-dataset-available) - 2021 Bulgarian  
                     https://huggingface.co/datasets/CloverSearch/cc-news-mutlilingual  
                     '''
                 )

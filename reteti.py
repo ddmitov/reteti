@@ -28,6 +28,9 @@ os.environ['ALLOW_HTTP']                 = 'True'
 
 bucket = os.environ['BUCKET']
 
+# Initialize sentence segmenter:
+segmenter = pysbd.Segmenter(language='bg', clean=False)
+
 
 def reteti_logger_starter() -> logging.Logger:
     start_datetime_string = (
@@ -47,6 +50,12 @@ def reteti_logger_starter() -> logging.Logger:
     return logger
 
 
+def reteti_sentence_splitter(text: str) -> True:
+    sentences = segmenter.segment(text)
+
+    return sentences
+
+
 def reteti_batch_indexer(
     text_batch_list: list,
     metadata_column_names: list
@@ -57,9 +66,6 @@ def reteti_batch_indexer(
 
     # Initialize tokenizer:
     tokenizer = Tokenizer.from_file('/tokenizer/tokenizer.json')
-
-    # Initialize sentence segmenter:
-    segmenter = pysbd.Segmenter(language='bg', clean=False)
 
     try:
         batch_number = 0
@@ -79,13 +85,14 @@ def reteti_batch_indexer(
                 metadata_table_item = {}
 
                 metadata_table_item['text_id'] = int(text['text_id'])
+
                 for metadata_column_name in metadata_column_names:
                     metadata_table_item[metadata_column_name] = \
                         text[metadata_column_name]
 
                 metadata_list.append(metadata_table_item)
 
-                sentences = segmenter.segment(str(text['text']))
+                sentences = reteti_sentence_splitter(str(text['text']))
                 sentence_number = 0
 
                 # Iterate over all sentences in a text:
@@ -229,8 +236,6 @@ def reteti_searcher(query_tokenized):
         scheme='http'
     )
 
-    bucket = os.environ['BUCKET']
-
     # Get all query tokens:
     token_list = query_tokenized.ids
 
@@ -365,7 +370,7 @@ def reteti_searcher(query_tokenized):
                     mat.text_id = trat.text_id
                 LEFT JOIN texts_arrow_table tat ON
                     tat.text_id = trat.text_id
-                    AND trat.sentence_id = tat.sentence_id
+                    AND tat.sentence_id = trat.sentence_id
             ORDER BY matching_tokens DESC
         '''
     ).fetch_arrow_table().to_pandas()
