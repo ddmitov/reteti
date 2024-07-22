@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+from typing import List
+
 import duckdb
 from huggingface_hub import hf_hub_download
 
