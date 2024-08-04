@@ -239,7 +239,9 @@ def reteti_searcher(query_tokenized):
     # Get all query tokens:
     token_list = query_tokenized.ids
 
-    # Step 1 - read all token tables:
+    # Step 1 - read token data:
+    step_01_start_time = time.time()
+
     token_arrow_tables_list = []
 
     for token in token_list:
@@ -259,12 +261,17 @@ def reteti_searcher(query_tokenized):
 
     tokens_arrow_table = pa.concat_tables(token_arrow_tables_list)
 
+    step_01_time = time.time() - step_01_start_time
+    print(f'Step 1 runtime in seconds: {step_01_time}')
+
     # Step 2 - get the IDs of the top N matching texts:
+    step_02_start_time = time.time()
+
     top_results_arrow_table = duckdb.sql(
         f'''
             SELECT
-                text_id,
-                sentence_id,
+                FIRST(text_id) AS text_id,
+                FIRST(sentence_id) AS sentence_id,
                 SUM(frequency) AS matching_tokens
             FROM tokens_arrow_table
             GROUP BY
@@ -283,15 +290,16 @@ def reteti_searcher(query_tokenized):
         '''
     ).fetch_arrow_table().to_pandas()['text_id'].to_list()
 
-    # Step 3 - get the top N matching texts:
-    text_sql = ''
-    metadata_sql = ''
+    step_02_time = time.time() - step_02_start_time
+    print(f'Step 2 runtime in seconds: {step_02_time}')
 
-    text_number = 0
+    # Step 3 - get the top N matching texts:
+    step_03_start_time = time.time()
+
+    text_arrow_tables_list = []
+    metadata_arrow_tables_list = []
 
     for text_id in top_texts_list:
-        text_number += 1
-
         text_arrow_table = pq.ParquetDataset(
             f'{bucket}/texts/text_id={text_id}/',
             filesystem=parquet_dataset_filesystem
@@ -302,6 +310,13 @@ def reteti_searcher(query_tokenized):
             ],
             use_threads=True
         )
+
+        text_arrow_table = text_arrow_table.append_column(
+            'text_id',
+            pa.array([text_id] * text_arrow_table.num_rows, pa.int64())
+        )
+
+        text_arrow_tables_list.append(text_arrow_table)
 
         metadata_arrow_table = pq.ParquetDataset(
             f'{bucket}/metadata/text_id={text_id}/',
@@ -314,49 +329,24 @@ def reteti_searcher(query_tokenized):
             use_threads=True
         )
 
-        # All text Arrow tables have dynamically generated variable names:
-        locals()[f'text_arrow_table_{str(text_id)}']     = text_arrow_table
-        locals()[f'metadata_arrow_table_{str(text_id)}'] = metadata_arrow_table
-
-        text_sql += str(
-            f'''
-                SELECT
-                    {text_id} AS text_id,
-                    sentence_id,
-                    sentence
-                FROM text_arrow_table_{str(text_id)}
-            '''
+        metadata_arrow_table = metadata_arrow_table.append_column(
+            'text_id',
+            pa.array([text_id] * metadata_arrow_table.num_rows, pa.int64())
         )
 
-        metadata_sql += str(
-            f'''
-                SELECT
-                    {text_id} AS text_id,
-                    date,
-                    title
-                FROM metadata_arrow_table_{str(text_id)}
-            '''
-        )
+        metadata_arrow_tables_list.append(metadata_arrow_table)
 
-        if text_number < len(top_texts_list):
-            text_sql += str(
-                f'''
-                    UNION
-                '''
-            )
+    texts_arrow_table     = pa.concat_tables(text_arrow_tables_list)
+    metadata_arrow_table  = pa.concat_tables(metadata_arrow_tables_list)
 
-            metadata_sql += str(
-                f'''
-                    UNION
-                '''
-            )
-
-    texts_arrow_table    = duckdb.sql(text_sql).arrow()
-    metadata_arrow_table = duckdb.sql(metadata_sql).arrow()
+    step_03_time = time.time() - step_03_start_time
+    print(f'Step 3 runtime in seconds: {step_03_time}')
 
     # Step 4 - get the final search result:
+    step_04_start_time = time.time()
+
     search_result_dataframe = duckdb.query(
-        f'''
+        '''
             SELECT
                 CAST(trat.matching_tokens AS INT) AS matching_tokens,
                 trat.text_id,
@@ -376,5 +366,8 @@ def reteti_searcher(query_tokenized):
     ).fetch_arrow_table().to_pandas()
 
     search_result = search_result_dataframe.to_dict('records')
+
+    step_04_time = time.time() - step_04_start_time
+    print(f'Step 4 runtime in seconds: {step_04_time}')
 
     return search_result
