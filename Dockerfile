@@ -22,11 +22,6 @@ RUN python3 /etc/tokenizer_downloader.py
 # Reteti Gradio demo application:
 RUN pip install --no-cache gradio
 
-RUN mkdir     /.cache
-RUN chmod 777 /.cache
-RUN mkdir     /.cache/matplotlib
-RUN chmod 777 /.cache/matplotlib
-
 RUN mkdir /home/reteti
 COPY ./.env        /home/reteti/.env
 COPY ./reteti.py   /home/reteti/reteti.py

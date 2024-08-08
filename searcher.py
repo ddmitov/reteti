@@ -14,12 +14,6 @@ import uvicorn
 
 from reteti import reteti_searcher
 
-# Start the application for local development at http://0.0.0.0:7860/ using:
-# docker run --rm -it --user $(id -u):$(id -g) -v $PWD:/app -p 7860:7860 reteti python /app/searcher.py
-
-# Start the containerized application:
-# docker run --rm -it -p 7860:7860 reteti
-
 # Load settings from .env file:
 load_dotenv(find_dotenv())
 
@@ -79,6 +73,10 @@ def main():
     os.environ['AWS_SECRET_ACCESS_KEY'] = os.environ['SECRET_ACCESS_KEY']
     os.environ['AWS_REGION']            = 'us-east-1'
     os.environ['ALLOW_HTTP']            = 'True'
+
+    # Matplotlib writable config directory,
+    # Matplotlib is a dependency of Gradio:
+    os.environ['MPLCONFIGDIR'] = '/app/data/.config/matplotlib'
 
     # Initialize tokenizer:
     global tokenizer
