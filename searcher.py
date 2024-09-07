@@ -83,7 +83,7 @@ def main():
 
     search_info_box=gr.JSON(label='Search Info', show_label=True)
 
-    search_results_box=gr.JSON(label='Search Results', show_label=True)
+    search_results_box=gr.JSON(label='Search Result', show_label=True)
 
     # Dark theme by default:
     javascript_code = '''

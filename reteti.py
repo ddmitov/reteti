@@ -226,12 +226,17 @@ def reteti_searcher(token_list: list) -> tuple[dict, dict]:
     token_arrow_tables_list = []
 
     for token in token_list:
-        token_arrow_table = pq.ParquetDataset(
-            f'{bucket}/tokens/{token}/',
-            filesystem=parquet_dataset_filesystem
-        ).read()
+        # If a token does not exist in the dataset,
+        # this must not fail the extraction of the existing token data:
+        try:
+            token_arrow_table = pq.ParquetDataset(
+                f'{bucket}/tokens/{token}/',
+                filesystem=parquet_dataset_filesystem
+            ).read()
 
-        token_arrow_tables_list.append(token_arrow_table)
+            token_arrow_tables_list.append(token_arrow_table)
+        except Exception:
+            pass
 
     tokens_arrow_table = pa.concat_tables(token_arrow_tables_list)
 
@@ -286,20 +291,37 @@ def reteti_searcher(token_list: list) -> tuple[dict, dict]:
     # Step 4 - get the final search results:
     step_04_start_time = time.time()
 
-    search_result_dataframe = duckdb.query(
-        '''
-            SELECT
-                CAST(tr.total_matching_tokens AS INT) AS total_matching_tokens,
-                t.text_id,
-                t.* EXCLUDE (text_id, text),
-                t.text
-            FROM
-                top_results_arrow_table tr
-                LEFT JOIN texts_arrow_table t ON
-                    t.text_id = tr.text_id
-            ORDER BY tr.total_matching_tokens DESC
-        '''
-    ).fetch_arrow_table().to_pandas()
+    try:
+        search_result_dataframe = duckdb.query(
+            '''
+                SELECT
+                    CAST(tr.total_matching_tokens AS INT) AS total_matching_tokens,
+                    t.text_id,
+                    t.* EXCLUDE (text_id, text),
+                    t.text
+                FROM
+                    top_results_arrow_table tr
+                    LEFT JOIN texts_arrow_table t ON
+                        t.text_id = tr.text_id
+                ORDER BY tr.total_matching_tokens DESC
+            '''
+        ).fetch_arrow_table().to_pandas()
+    except Exception:
+        step_04_time = time.time() - step_04_start_time
+
+        total_time = step_01_time + step_02_time + step_03_time + step_04_time
+
+        search_info = {}
+        search_info['Step 1 runtime in seconds:'] = step_01_time
+        search_info['Step 2 runtime in seconds:'] = step_02_time
+        search_info['Step 3 runtime in seconds:'] = step_03_time
+        search_info['Step 4 runtime in seconds:'] = step_04_time
+        search_info['Total runtime in seconds: '] = total_time
+
+        search_result = {}
+        search_result['Search Result:'] = 'No matching texts were found.'
+
+        return search_info, search_result
 
     search_result = search_result_dataframe.to_dict('records')
 
@@ -308,7 +330,6 @@ def reteti_searcher(token_list: list) -> tuple[dict, dict]:
     total_time = step_01_time + step_02_time + step_03_time + step_04_time
 
     search_info = {}
-
     search_info['Step 1 runtime in seconds:'] = step_01_time
     search_info['Step 2 runtime in seconds:'] = step_02_time
     search_info['Step 3 runtime in seconds:'] = step_03_time
