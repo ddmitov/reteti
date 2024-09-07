@@ -37,14 +37,7 @@ def text_searcher(search_request: str)-> object:
     )
 
     # Search:
-    search_info, search_result = None, None
-
-    search_start_time = time.time()
-
-    search_result = reteti_searcher(query_tokenized)
-
-    search_time = time.time() - search_start_time
-    search_info = {'Search Time': f'{search_time:.3f} s'}
+    search_info, search_result = reteti_searcher(query_tokenized.ids)
 
     return search_info, search_result
 
@@ -126,7 +119,7 @@ def main():
             text-decoration: none;
         }
 
-        .search {font-size: 16px !important}
+        .dark {font-size: 16px !important}
     '''
 
     # Initialize Gradio interface:
@@ -177,9 +170,12 @@ def main():
         with gr.Row():
             gr.Examples(
                 [
-                    'Бойко Борисов',
+                    'парламент',
+                    'правителство',
                     'Румен Радев',
+                    'Бойко Борисов',
                     'околна среда',
+                    'Европейски съюз'
                 ],
                 fn=text_searcher,
                 inputs=search_request_box,

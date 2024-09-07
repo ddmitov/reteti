@@ -5,31 +5,17 @@ import logging
 import os
 import time
 
-from deltalake import write_deltalake
-from dotenv import find_dotenv, load_dotenv
+from dotenv import find_dotenv
+from dotenv import load_dotenv
 import duckdb
-import pandas as pd
+import pandas          as pd
 import pyarrow         as pa
 import pyarrow.dataset as ds
 import pyarrow.fs      as fs
 import pyarrow.parquet as pq
-import pysbd
 from tokenizers import Tokenizer
 
 load_dotenv(find_dotenv())
-
-# Object storage settings for the deltalake module:
-os.environ['AWS_ENDPOINT']               = os.environ['ENDPOINT_S3']
-os.environ['AWS_ACCESS_KEY_ID']          = os.environ['ACCESS_KEY_ID']
-os.environ['AWS_SECRET_ACCESS_KEY']      = os.environ['SECRET_ACCESS_KEY']
-os.environ['AWS_REGION']                 = 'us-east-1'
-os.environ['AWS_S3_ALLOW_UNSAFE_RENAME'] = 'true'
-os.environ['ALLOW_HTTP']                 = 'True'
-
-bucket = os.environ['BUCKET']
-
-# Initialize sentence segmenter:
-segmenter = pysbd.Segmenter(language='bg', clean=False)
 
 
 def reteti_logger_starter() -> logging.Logger:
@@ -50,16 +36,19 @@ def reteti_logger_starter() -> logging.Logger:
     return logger
 
 
-def reteti_sentence_splitter(text: str) -> True:
-    sentences = segmenter.segment(text)
-
-    return sentences
-
-
 def reteti_batch_indexer(
     text_batch_list: list,
     metadata_column_names: list
 ) -> True:
+    bucket = os.environ['BUCKET']
+
+    parquet_dataset_filesystem = fs.S3FileSystem(
+        endpoint_override=os.environ['ENDPOINT_S3'],
+        access_key=os.environ['ACCESS_KEY_ID'],
+        secret_key=os.environ['SECRET_ACCESS_KEY'],
+        scheme='http'
+    )
+
     # Start logging: 
     logger = reteti_logger_starter()
     total_time = 0
@@ -77,117 +66,114 @@ def reteti_batch_indexer(
             batch_number += 1
 
             text_list = []
-            metadata_list = []
             token_list = []
 
             # Iterate over all texts in a batch:
             for text in batch:
-                metadata_table_item = {}
+                text_table_item = {}
 
-                metadata_table_item['text_id'] = int(text['text_id'])
+                text_table_item['text_id'] = int(text['text_id'])
+                text_table_item['text']    = str(text['text'])
 
                 for metadata_column_name in metadata_column_names:
-                    metadata_table_item[metadata_column_name] = \
+                    text_table_item[metadata_column_name] = \
                         text[metadata_column_name]
 
-                metadata_list.append(metadata_table_item)
+                # Prepare list of dictionaries:
+                text_list.append(text_table_item)
 
-                sentences = reteti_sentence_splitter(str(text['text']))
-                sentence_number = 0
+                # Tokenize every text:
+                tokenized_text = tokenizer.encode(
+                    sequence=str(text['text']),
+                    add_special_tokens=False
+                )
 
-                # Iterate over all sentences in a text:
-                for sentence in sentences:
-                    sentence_number += 1
+                token_ids = tokenized_text.ids
 
-                    text_table_item = {}
+                # Calculate token frequencies and store them in a dictionary:
+                token_frequencies = {
+                    token_id: token_ids.count(token_id)
+                    for token_id in set(token_ids)
+                }
 
-                    text_table_item['text_id']     = int(text['text_id'])
-                    text_table_item['sentence_id'] = int(sentence_number)
-                    text_table_item['sentence']    = str(sentence)
+                for token_id, token_frequency in token_frequencies.items():
+                    token_item = {}
 
-                    # Prepare text-level list of dictionaries:
-                    text_list.append(text_table_item)
+                    token_item['token']     = int(token_id)
+                    token_item['text_id']   = int(text['text_id'])
+                    token_item['frequency'] = int(token_frequency)
 
-                    # Tokenize every sentence:
-                    tokenized_text = tokenizer.encode(
-                        sequence=sentence,
-                        add_special_tokens=False
-                    )
+                    token_list.append(token_item)
 
-                    token_ids = tokenized_text.ids
+            # Add data to the text dataset:
+            texts_dataframe = pd.DataFrame(text_list)
 
-                    # Calculate token frequencies and
-                    # store them in a dictionary:
-                    token_frequencies = {
-                        token_id: token_ids.count(token_id)
-                        for token_id in set(token_ids)
-                    }
+            texts_arrow_table = duckdb.sql(
+                f'''
+                    SELECT
+                        text_id AS partition,
+                        text_id,
+                        text,
+                        * EXCLUDE (text_id, text)
+                    FROM texts_dataframe
+                '''
+            ).arrow()
 
-                    for token_id, token_frequency in token_frequencies.items():
-                        token_item = {}
+            unique_text_ids = duckdb.query(
+                f'''
+                    SELECT COUNT(text_id) AS text_ids
+                    FROM texts_arrow_table
+                '''
+            ).fetch_arrow_table().to_pandas()['text_ids'].iloc[0]
 
-                        token_item['token']       = int(token_id)
-                        token_item['text_id']     = int(text['text_id'])
-                        token_item['sentence_id'] = int(sentence_number)
-                        token_item['frequency']   = int(token_frequency)
-
-                        token_list.append(token_item)
-
-            # Add data to the metadata table:
-            metadata_dataframe = pd.DataFrame(metadata_list)
-
-            unique_texts = len(metadata_dataframe['text_id'].tolist())
-
-            write_deltalake(
-                f's3://{bucket}/metadata',
-                metadata_dataframe,
-                partition_by=['text_id'],
-                max_partitions=unique_texts,
-                mode='append'
+            pq.write_to_dataset(
+                texts_arrow_table,
+                filesystem=parquet_dataset_filesystem,
+                root_path=f'{bucket}/texts',
+                partitioning=['partition'],
+                basename_template='part-{i}.parquet',
+                existing_data_behavior='overwrite_or_ignore',
+                max_partitions=int(unique_text_ids)
             )
 
-            # Add data to the text table:
-            text_dataframe = pd.DataFrame(text_list)
-
-            text_dataframe.sort_values(
-                by=[
-                    'text_id',
-                    'sentence_id'
-                ],
-                ascending=True,
-                inplace=True
-            )
-
-            unique_texts = len(text_dataframe['text_id'].unique().tolist())
-
-            write_deltalake(
-                f's3://{bucket}/texts',
-                text_dataframe,
-                partition_by=['text_id'],
-                max_partitions=unique_texts,
-                mode='append'
-            )
-
-            # Add data to the tokens table:
+            # Add data to the tokens dataset:
             tokens_dataframe = pd.DataFrame(token_list)
 
-            tokens_dataframe.sort_values(
-                by=['token'],
-                ascending=True,
-                inplace=True
+            tokens_arrow_table = duckdb.sql(
+                f'''
+                    SELECT
+                        token AS partition,
+                        token,
+                        text_id,
+                        frequency
+                    FROM tokens_dataframe
+                    ORDER BY token ASC
+                '''
+            ).arrow()
+
+            unique_tokens = duckdb.query(
+                f'''
+                    SELECT COUNT(DISTINCT token) AS tokens
+                    FROM tokens_arrow_table
+                '''
+            ).fetch_arrow_table().to_pandas()['tokens'].iloc[0]
+
+            date_time_now = datetime.datetime.now()
+            date_time_string = (
+                date_time_now.strftime('%Y-%m-%d--%H-%M-%S').strip()
             )
 
-            unique_tokens = len(tokens_dataframe['token'].unique().tolist())
-
-            write_deltalake(
-                f's3://{bucket}/tokens',
-                tokens_dataframe,
-                partition_by=['token'],
-                max_partitions=unique_tokens,
-                mode='append'
+            pq.write_to_dataset(
+                tokens_arrow_table,
+                filesystem=parquet_dataset_filesystem,
+                root_path=f'{bucket}/tokens',
+                partitioning=['partition'],
+                basename_template='part-{{i}}--{}.parquet'.format(date_time_string),
+                existing_data_behavior='overwrite_or_ignore',
+                max_partitions=int(unique_tokens)
             )
 
-            # Calculate the batch processing time:
+            # Calculate, display and log processing times:
             batch_indexing_end = time.time()
 
             batch_indexing_time = round(
@@ -199,11 +185,9 @@ def reteti_batch_indexer(
                 datetime.timedelta(seconds=batch_indexing_time)
             )
 
-            # Calculate the total processing time:
             total_time = round((total_time + batch_indexing_time), 3)
             total_time_string = str(datetime.timedelta(seconds=total_time))
 
-            # Display and log the batch processing time:
             print(
                 f'batch {batch_number}/{len(text_batch_list)} ' +
                 f'tokenized for {batch_indexing_time_string}'
@@ -214,7 +198,6 @@ def reteti_batch_indexer(
                 f'tokenized for {batch_indexing_time_string}'
             )
 
-        # Display and log the total time just before the script exits:
         print('')
         print(f'total time: {total_time_string}')
         print('')
@@ -227,17 +210,15 @@ def reteti_batch_indexer(
     return True
 
 
-def reteti_searcher(query_tokenized):
-    # Set object storage settings:
+def reteti_searcher(token_list: list) -> tuple[dict, dict]:
+    bucket = os.environ['BUCKET']
+
     parquet_dataset_filesystem = fs.S3FileSystem(
         endpoint_override=os.environ['ENDPOINT_S3'],
         access_key=os.environ['ACCESS_KEY_ID'],
         secret_key=os.environ['SECRET_ACCESS_KEY'],
         scheme='http'
     )
-
-    # Get all query tokens:
-    token_list = query_tokenized.ids
 
     # Step 1 - read token data:
     step_01_start_time = time.time()
@@ -246,39 +227,33 @@ def reteti_searcher(query_tokenized):
 
     for token in token_list:
         token_arrow_table = pq.ParquetDataset(
-            f'{bucket}/tokens/token={token}/',
+            f'{bucket}/tokens/{token}/',
             filesystem=parquet_dataset_filesystem
-        ).read(
-            columns=[
-                'text_id',
-                'sentence_id',
-                'frequency'
-            ],
-            use_threads=True
-        )
+        ).read()
 
         token_arrow_tables_list.append(token_arrow_table)
 
     tokens_arrow_table = pa.concat_tables(token_arrow_tables_list)
 
     step_01_time = time.time() - step_01_start_time
-    print(f'Step 1 runtime in seconds: {step_01_time}')
 
-    # Step 2 - get the IDs of the top N matching texts:
+    # Step 2 - get the top N matching text IDs:
     step_02_start_time = time.time()
+
+    unique_tokens_number = len(set(token_list))
 
     top_results_arrow_table = duckdb.sql(
         f'''
             SELECT
-                FIRST(text_id) AS text_id,
-                FIRST(sentence_id) AS sentence_id,
-                SUM(frequency) AS matching_tokens
-            FROM tokens_arrow_table
-            GROUP BY
                 text_id,
-                sentence_id
-            HAVING matching_tokens >= {len(token_list)}
-            ORDER BY matching_tokens DESC
+                COUNT(DISTINCT(token)) AS unique_matching_tokens,
+                SUM(frequency) AS total_matching_tokens
+            FROM tokens_arrow_table tat
+            GROUP BY text_id
+            HAVING
+                unique_matching_tokens = {unique_tokens_number}
+                AND total_matching_tokens >= {len(token_list)}
+            ORDER BY total_matching_tokens DESC
             LIMIT 10
         '''
     ).arrow()
@@ -291,83 +266,53 @@ def reteti_searcher(query_tokenized):
     ).fetch_arrow_table().to_pandas()['text_id'].to_list()
 
     step_02_time = time.time() - step_02_start_time
-    print(f'Step 2 runtime in seconds: {step_02_time}')
 
     # Step 3 - get the top N matching texts:
     step_03_start_time = time.time()
 
-    text_arrow_tables_list = []
-    metadata_arrow_tables_list = []
+    text_parquet_paths = []
 
     for text_id in top_texts_list:
-        text_arrow_table = pq.ParquetDataset(
-            f'{bucket}/texts/text_id={text_id}/',
-            filesystem=parquet_dataset_filesystem
-        ).read(
-            columns=[
-                'sentence_id',
-                'sentence'
-            ],
-            use_threads=True
-        )
+        text_parquet_path = f'{bucket}/texts/{text_id}/part-0.parquet'
+        text_parquet_paths.append(text_parquet_path)
 
-        text_arrow_table = text_arrow_table.append_column(
-            'text_id',
-            pa.array([text_id] * text_arrow_table.num_rows, pa.int64())
-        )
-
-        text_arrow_tables_list.append(text_arrow_table)
-
-        metadata_arrow_table = pq.ParquetDataset(
-            f'{bucket}/metadata/text_id={text_id}/',
-            filesystem=parquet_dataset_filesystem
-        ).read(
-            columns=[
-                'date',
-                'title'
-            ],
-            use_threads=True
-        )
-
-        metadata_arrow_table = metadata_arrow_table.append_column(
-            'text_id',
-            pa.array([text_id] * metadata_arrow_table.num_rows, pa.int64())
-        )
-
-        metadata_arrow_tables_list.append(metadata_arrow_table)
-
-    texts_arrow_table     = pa.concat_tables(text_arrow_tables_list)
-    metadata_arrow_table  = pa.concat_tables(metadata_arrow_tables_list)
+    texts_arrow_table = pq.ParquetDataset(
+        text_parquet_paths,
+        filesystem=parquet_dataset_filesystem
+    ).read()
 
     step_03_time = time.time() - step_03_start_time
-    print(f'Step 3 runtime in seconds: {step_03_time}')
 
-    # Step 4 - get the final search result:
+    # Step 4 - get the final search results:
     step_04_start_time = time.time()
 
     search_result_dataframe = duckdb.query(
         '''
             SELECT
-                CAST(trat.matching_tokens AS INT) AS matching_tokens,
-                trat.text_id,
-                mat.date,
-                mat.title,
-                tat.sentence_id,
-                tat.sentence
+                CAST(tr.total_matching_tokens AS INT) AS total_matching_tokens,
+                t.text_id,
+                t.* EXCLUDE (text_id, text),
+                t.text
             FROM
-                top_results_arrow_table trat
-                LEFT JOIN metadata_arrow_table mat ON
-                    mat.text_id = trat.text_id
-                LEFT JOIN texts_arrow_table tat ON
-                    tat.text_id = trat.text_id
-                    AND tat.sentence_id = trat.sentence_id
-            ORDER BY matching_tokens DESC
+                top_results_arrow_table tr
+                LEFT JOIN texts_arrow_table t ON
+                    t.text_id = tr.text_id
+            ORDER BY tr.total_matching_tokens DESC
         '''
     ).fetch_arrow_table().to_pandas()
 
     search_result = search_result_dataframe.to_dict('records')
 
     step_04_time = time.time() - step_04_start_time
-    print(f'Step 4 runtime in seconds: {step_04_time}')
 
-    return search_result
+    total_time = step_01_time + step_02_time + step_03_time + step_04_time
+
+    search_info = {}
+
+    search_info['Step 1 runtime in seconds:'] = step_01_time
+    search_info['Step 2 runtime in seconds:'] = step_02_time
+    search_info['Step 3 runtime in seconds:'] = step_03_time
+    search_info['Step 4 runtime in seconds:'] = step_04_time
+    search_info['Total runtime in seconds: '] = total_time
+
+    return search_info, search_result

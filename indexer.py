@@ -7,11 +7,9 @@ from huggingface_hub import hf_hub_download
 
 from reteti import reteti_batch_indexer
 
-# docker run --rm -it --user $(id -u):$(id -g) -v $PWD:/app reteti python /app/indexer.py
-
 # Input data settings:
 TEXTS_NUMBER           = 100000
-TEXTS_PER_BATCH_NUMBER =   1000
+TEXTS_PER_BATCH_NUMBER =   5000
 
 
 def newlines_remover(text: str) -> str:
@@ -44,15 +42,15 @@ def data_preprocessor(texts_per_batch_number: int) -> List[list]:
         f'''
             SELECT
                 nextval('text_id_maker') AS text_id,
-                date_publish_final AS date,
+                -- date_publish_final AS date,
                 newlines_remover(title) AS title,
                 newlines_remover(maintext) AS text
             FROM read_json_auto("/app/data/hf/2021/bg.jsonl.gz")
             WHERE
-                date_publish_final IS NOT NULL
-                AND title IS NOT NULL
-                AND maintext IS NOT NULL
+                -- date_publish_final IS NOT NULL
+                title IS NOT NULL
                 AND title NOT LIKE '%...'
+                AND LENGTH(maintext) <= 2000
             LIMIT {str(TEXTS_NUMBER)}
         '''
     ).to_arrow_table().to_pylist()
@@ -72,7 +70,7 @@ def main():
     text_batches_list = data_preprocessor(TEXTS_PER_BATCH_NUMBER)
 
     # Index all text batches:
-    metadata_column_names = ['date', 'title']
+    metadata_column_names = ['title']
 
     reteti_batch_indexer(text_batches_list, metadata_column_names)
 

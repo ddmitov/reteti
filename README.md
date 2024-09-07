@@ -1,9 +1,9 @@
 Reteti
 --------------------------------------------------------------------------------
+
+<img align="left" width="100" height="100" src="assets/fupi_svgrepo_com.png">
   
 Reteti is a work-in-progress serverless keyword search experiment based on a tokenizer and a partitioned index in object storage.
-  
-<img align="left" width="100" height="100" src="assets/fupi_svgrepo_com.png">
 
 ## Design Objectives
 
