@@ -64,35 +64,42 @@ def reteti_batch_indexer(
 
             batch_number += 1
 
-            text_list = []
-            token_list = []
+            # Lists of dictionaries:
+            text_table_list = []
+            token_table_list = []
 
             # Iterate over all texts in a batch:
             for text in batch:
-                text_table_item = {}
-
-                text_table_item['text_id'] = int(text['text_id'])
-                text_table_item['text']    = str(text['text'])
-
-                for metadata_column_name in metadata_column_names:
-                    text_table_item[metadata_column_name] = \
-                        text[metadata_column_name]
-
-                # Prepare list of dictionaries:
-                text_list.append(text_table_item)
-
                 # Tokenize every text:
                 tokenized_text = tokenizer.encode(
                     sequence=str(text['text']),
                     add_special_tokens=False
                 )
 
-                token_ids = tokenized_text.ids
+                token_list = tokenized_text.ids
+
+                # Create a token sequence string for
+                # exact matching of search requests:
+                token_sequence_string = \
+                    '|' + '|'.join(map(str, token_list)) + '|'
+
+                # Prepare data for the text dataset:
+                text_item = {}
+
+                text_item['text_id']        = int(text['text_id'])
+                text_item['text']           = str(text['text'])
+                text_item['token_sequence'] = token_sequence_string
+
+                for metadata_column_name in metadata_column_names:
+                    text_item[metadata_column_name] = \
+                        text[metadata_column_name]
+
+                text_table_list.append(text_item)
 
                 # Calculate token frequencies and store them in a dictionary:
                 token_frequencies = {
-                    token_id: token_ids.count(token_id)
-                    for token_id in set(token_ids)
+                    token_id: token_list.count(token_id)
+                    for token_id in set(token_list)
                 }
 
                 for token_id, token_frequency in token_frequencies.items():
@@ -102,18 +109,19 @@ def reteti_batch_indexer(
                     token_item['text_id']   = int(text['text_id'])
                     token_item['frequency'] = int(token_frequency)
 
-                    token_list.append(token_item)
+                    token_table_list.append(token_item)
 
             # Add data to the text dataset:
-            texts_dataframe = pd.DataFrame(text_list)
+            texts_dataframe = pd.DataFrame(text_table_list)
 
             texts_arrow_table = duckdb.sql(
                 f'''
                     SELECT
                         text_id AS partition,
                         text_id,
+                        token_sequence,
                         text,
-                        * EXCLUDE (text_id, text)
+                        * EXCLUDE (text_id, token_sequence, text)
                     FROM texts_dataframe
                 '''
             ).arrow()
@@ -136,7 +144,7 @@ def reteti_batch_indexer(
             )
 
             # Add data to the tokens dataset:
-            tokens_dataframe = pd.DataFrame(token_list)
+            tokens_dataframe = pd.DataFrame(token_table_list)
 
             tokens_arrow_table = duckdb.sql(
                 f'''
@@ -208,7 +216,7 @@ def reteti_batch_indexer(
     return True
 
 
-def reteti_searcher(token_list: list) -> tuple[dict, dict]:
+def reteti_searcher(token_list: list, search_type: str) -> tuple[dict, dict]:
     bucket = os.environ['BUCKET']
 
     parquet_dataset_filesystem = fs.S3FileSystem(
@@ -243,22 +251,55 @@ def reteti_searcher(token_list: list) -> tuple[dict, dict]:
 
     step_01_time = round((time.time() - step_01_start_time), 3)
 
-    # Step 2 - get the top N text IDs:
+    # Step 2 - get text IDs:
     step_02_start_time = time.time()
+
+    request_token_frequencies = {
+        token_id: token_list.count(token_id)
+        for token_id in set(token_list)
+    }
+
+    request_token_frequency_list = []
+
+    for token_id, token_frequency in request_token_frequencies.items():
+        token_item = {}
+        token_item['token']     = int(token_id)
+        token_item['frequency'] = int(token_frequency)
+
+        request_token_frequency_list.append(token_item)
+
+    request_token_frequency_dataframe = \
+        pd.DataFrame(request_token_frequency_list)
+
+    step_02_limit = ''
+
+    if search_type == 'Approximate Search':
+        step_02_limit = 'LIMIT 10'
 
     top_results_arrow_table = duckdb.sql(
         f'''
+            WITH
+            eligible_texts_cte AS (
+                SELECT
+                    text_id,
+                    COUNT(DISTINCT(token)) AS unique_tokens
+                FROM tokens_arrow_table
+                GROUP BY text_id
+                HAVING unique_tokens = {len(token_set)}
+            )
+
             SELECT
-                text_id,
-                COUNT(DISTINCT(token)) AS unique_matching_tokens,
-                SUM(frequency) AS total_matching_tokens
-            FROM tokens_arrow_table tat
-            GROUP BY text_id
-            HAVING
-                unique_matching_tokens = {len(token_set)}
-                AND total_matching_tokens >= {len(token_list)}
-            ORDER BY total_matching_tokens DESC
-            LIMIT 10
+                tat.text_id,
+                SUM(CAST(tat.frequency AS INT)) AS total_tokens
+            FROM
+                tokens_arrow_table tat
+                INNER JOIN eligible_texts_cte etc ON
+                    etc.text_id = tat.text_id
+                INNER JOIN request_token_frequency_dataframe rtfd ON
+                    rtfd.token = tat.token
+                    AND rtfd.frequency >= tat.frequency
+            GROUP BY tat.text_id
+            {step_02_limit}
         '''
     ).arrow()
 
@@ -271,7 +312,7 @@ def reteti_searcher(token_list: list) -> tuple[dict, dict]:
 
     step_02_time = round((time.time() - step_02_start_time), 3)
 
-    # Step 3 - get the top N texts:
+    # Step 3 - get texts:
     step_03_start_time = time.time()
 
     text_parquet_paths = []
@@ -290,25 +331,38 @@ def reteti_searcher(token_list: list) -> tuple[dict, dict]:
     # Step 4 - get the final results:
     step_04_start_time = time.time()
 
-    step_01_label = 'Step 1 - read token data ........ runtime in seconds:'
-    step_02_label = 'Step 2 - get the top N text IDs . runtime in seconds:'
-    step_03_label = 'Step 3 - get the top N texts .... runtime in seconds:'
-    step_04_label = 'Step 4 - get the final results .. runtime in seconds:'
-    total_label   = 'Total ........................... runtime in seconds:'
+    step_01_label = 'Step 1 - read token data ... runtime in seconds:'
+    step_02_label = 'Step 2 - get text IDs ...... runtime in seconds:'
+    step_03_label = 'Step 3 - get texts ......... runtime in seconds:'
+    step_04_label = 'Step 4 - get final results . runtime in seconds:'
+    total_label   = 'Total ...................... runtime in seconds:'
+
+    token_sequence_string = '|'.join(map(str, token_list))
+
+    step_03_condition = ''
+    step_03_limit     = ''
+
+    if search_type == 'Exact Search':
+        step_03_condition = f'''
+                WHERE token_sequence LIKE '%{token_sequence_string}%'
+        '''
+        step_03_limit = 'LIMIT 10'
 
     try:
         search_result_dataframe = duckdb.query(
-            '''
+            f'''
                 SELECT
-                    CAST(tr.total_matching_tokens AS INT) AS matching_tokens,
+                    CAST(tr.total_tokens AS INT) AS matching_tokens,
                     t.text_id,
-                    t.* EXCLUDE (text_id, text),
+                    t.* EXCLUDE (text_id, token_sequence, text),
                     t.text
                 FROM
                     top_results_arrow_table tr
                     LEFT JOIN texts_arrow_table t ON
                         t.text_id = tr.text_id
-                ORDER BY tr.total_matching_tokens DESC
+                {step_03_condition}
+                ORDER BY tr.total_tokens DESC
+                {step_03_limit}
             '''
         ).fetch_arrow_table().to_pandas()
     except Exception:

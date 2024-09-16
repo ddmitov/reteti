@@ -6,7 +6,8 @@ import signal
 import time
 import threading
 
-from dotenv import load_dotenv, find_dotenv
+from dotenv import find_dotenv
+from dotenv import load_dotenv
 from fastapi import FastAPI
 import gradio as gr
 from tokenizers import Tokenizer
@@ -22,8 +23,8 @@ tokenizer     = None
 last_activity = None
 
 
-def text_searcher(search_request: str)-> object:
-    # Update last activity date and time:
+def text_searcher(search_request: str, search_type: str) -> tuple[dict, dict]:
+    # Update the date and time of the last activity :
     global last_activity
 
     last_activity = time.time()
@@ -31,13 +32,16 @@ def text_searcher(search_request: str)-> object:
     # Tokenize the search request - use the already initialized tokenizer:
     global tokenizer
 
-    query_tokenized = tokenizer.encode(
+    search_request_tokenized = tokenizer.encode(
         sequence=search_request,
         add_special_tokens=False
-    )
+    ).ids
 
     # Search:
-    search_info, search_result = reteti_searcher(query_tokenized.ids)
+    search_info, search_result = reteti_searcher(
+        search_request_tokenized,
+        search_type
+    )
 
     return search_info, search_result
 
@@ -71,7 +75,7 @@ def main():
     # Matplotlib is a dependency of Gradio:
     os.environ['MPLCONFIGDIR'] = '/app/data/.config/matplotlib'
 
-    # Initialize tokenizer:
+    # Initialize the tokenizer only once when the application is started:
     global tokenizer
     tokenizer = Tokenizer.from_file('/tokenizer/tokenizer.json')
 
@@ -80,6 +84,15 @@ def main():
 
     # Define Gradio user interface:
     search_request_box=gr.Textbox(lines=1, label='Search Request')
+
+    search_type = gr.Radio(
+        [
+            'Approximate Search',
+            'Exact Search'
+        ],
+        value='Approximate Search',
+        label='Search Type',
+    )
 
     search_info_box=gr.JSON(label='Search Info', show_label=True)
 
@@ -135,7 +148,7 @@ def main():
             gr.Markdown(
                 '''
                 # Reteti Demo
-                ## Serverless Keyword Search
+                ## Scale to Zero and Serverless Keyword Search
                 '''
             )
 
@@ -168,20 +181,25 @@ def main():
             search_request_box.render()
 
         with gr.Row():
-            gr.Examples(
-                [
-                    'парламент',
-                    'правителство',
-                    'Румен Радев',
-                    'Бойко Борисов',
-                    'околна среда',
-                    'Европейски съюз'
-                ],
-                fn=text_searcher,
-                inputs=search_request_box,
-                outputs=search_results_box,
-                cache_examples=False
-            )
+            with gr.Column(scale=1):
+                search_type.render()
+
+            with gr.Column(scale=4):
+                gr.Examples(
+                    [
+                        'ваксина срещу COVID-19',
+                        'ваксина срещу коронавирус',
+                        'парламент',
+                        'правителство',
+                        'Румен Радев',
+                        'Бойко Борисов',
+                        'околна среда'
+                    ],
+                    fn=text_searcher,
+                    inputs=search_request_box,
+                    outputs=search_results_box,
+                    cache_examples=False
+                )
 
         with gr.Row():
             search_button = gr.Button('Search')
@@ -206,7 +224,10 @@ def main():
                 search_button.click
             ],
             fn=text_searcher,
-            inputs=[search_request_box],
+            inputs=[
+                search_request_box,
+                search_type
+            ],
             outputs=[
                 search_info_box,
                 search_results_box
