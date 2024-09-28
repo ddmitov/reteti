@@ -87,10 +87,10 @@ def main():
 
     search_type = gr.Radio(
         [
-            'Approximate Search',
-            'Exact Search'
+            'Approximate Match',
+            'Exact Match'
         ],
-        value='Approximate Search',
+        value='Approximate Match',
         label='Search Type',
     )
 

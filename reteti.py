@@ -273,10 +273,10 @@ def reteti_searcher(token_list: list, search_type: str) -> tuple[dict, dict]:
 
     step_02_limit = ''
 
-    if search_type == 'Approximate Search':
+    if search_type == 'Approximate Match':
         step_02_limit = 'LIMIT 10'
 
-    top_results_arrow_table = duckdb.sql(
+    text_id_list = duckdb.query(
         f'''
             WITH
             eligible_texts_cte AS (
@@ -288,9 +288,7 @@ def reteti_searcher(token_list: list, search_type: str) -> tuple[dict, dict]:
                 HAVING unique_tokens = {len(token_set)}
             )
 
-            SELECT
-                tat.text_id,
-                SUM(CAST(tat.frequency AS INT)) AS total_tokens
+            SELECT tat.text_id AS text_id
             FROM
                 tokens_arrow_table tat
                 INNER JOIN eligible_texts_cte etc ON
@@ -301,13 +299,6 @@ def reteti_searcher(token_list: list, search_type: str) -> tuple[dict, dict]:
             GROUP BY tat.text_id
             {step_02_limit}
         '''
-    ).arrow()
-
-    top_texts_list = duckdb.query(
-        f'''
-            SELECT text_id
-            FROM top_results_arrow_table
-        '''
     ).fetch_arrow_table().to_pandas()['text_id'].to_list()
 
     step_02_time = round((time.time() - step_02_start_time), 3)
@@ -317,7 +308,7 @@ def reteti_searcher(token_list: list, search_type: str) -> tuple[dict, dict]:
 
     text_parquet_paths = []
 
-    for text_id in top_texts_list:
+    for text_id in text_id_list:
         text_parquet_path = f'{bucket}/texts/{text_id}/part-0.parquet'
         text_parquet_paths.append(text_parquet_path)
 
@@ -339,30 +330,28 @@ def reteti_searcher(token_list: list, search_type: str) -> tuple[dict, dict]:
 
     token_sequence_string = '|'.join(map(str, token_list))
 
-    step_03_condition = ''
-    step_03_limit     = ''
+    step_04_condition = ''
 
-    if search_type == 'Exact Search':
-        step_03_condition = f'''
-                WHERE token_sequence LIKE '%{token_sequence_string}%'
-        '''
-        step_03_limit = 'LIMIT 10'
+    if search_type == 'Exact Match':
+        step_04_condition = \
+            f"WHERE token_sequence LIKE '%{token_sequence_string}%'"
 
     try:
         search_result_dataframe = duckdb.query(
             f'''
                 SELECT
-                    CAST(tr.total_tokens AS INT) AS matching_tokens,
-                    t.text_id,
-                    t.* EXCLUDE (text_id, token_sequence, text),
-                    t.text
-                FROM
-                    top_results_arrow_table tr
-                    LEFT JOIN texts_arrow_table t ON
-                        t.text_id = tr.text_id
-                {step_03_condition}
-                ORDER BY tr.total_tokens DESC
-                {step_03_limit}
+                    (
+                        CAST({len(token_list)} AS FLOAT)
+                        /
+                        CAST(LEN(STRING_SPLIT(token_sequence, '|')) AS FLOAT)
+                    ) AS token_frequency,
+                    text_id,
+                    * EXCLUDE (text_id, token_sequence, text),
+                    text
+                FROM texts_arrow_table
+                {step_04_condition}
+                ORDER BY token_frequency DESC
+                LIMIT 10
             '''
         ).fetch_arrow_table().to_pandas()
     except Exception:
