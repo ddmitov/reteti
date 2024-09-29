@@ -23,8 +23,12 @@ tokenizer     = None
 last_activity = None
 
 
-def text_searcher(search_request: str, search_type: str) -> tuple[dict, dict]:
-    # Update the date and time of the last activity :
+def text_searcher(
+    search_request: str,
+    search_type: str,
+    results_number: int
+) -> tuple[dict, dict]:
+    # Update the timestamp of the last activity:
     global last_activity
 
     last_activity = time.time()
@@ -40,7 +44,8 @@ def text_searcher(search_request: str, search_type: str) -> tuple[dict, dict]:
     # Search:
     search_info, search_result = reteti_searcher(
         search_request_tokenized,
-        search_type
+        search_type,
+        results_number
     )
 
     return search_info, search_result
@@ -58,7 +63,7 @@ def activity_inspector():
     thread.start()
 
     if time.time() - last_activity > int(os.environ['INACTIVITY_MAXIMUM_SECONDS']):
-        print(f'Initiating shutdown sequence at: {datetime.datetime.now()}')
+        print(f'Initiated shutdown sequence at: {datetime.datetime.now()}')
 
         os.kill(os.getpid(), signal.SIGINT)
 
@@ -94,9 +99,15 @@ def main():
         label='Search Type',
     )
 
+    results_number = gr.Dropdown(
+        [10, 20, 50],
+        label="Number of Search Results",
+        value=10
+    )
+
     search_info_box=gr.JSON(label='Search Info', show_label=True)
 
-    search_results_box=gr.JSON(label='Search Result', show_label=True)
+    search_results_box=gr.JSON(label='Search Results', show_label=True)
 
     # Dark theme by default:
     javascript_code = '''
@@ -184,15 +195,15 @@ def main():
             with gr.Column(scale=1):
                 search_type.render()
 
-            with gr.Column(scale=4):
+            with gr.Column(scale=1):
+                results_number.render()
+
+            with gr.Column(scale=3):
                 gr.Examples(
                     [
                         'ваксина срещу COVID-19',
                         'ваксина срещу коронавирус',
-                        'парламент',
-                        'правителство',
-                        'Румен Радев',
-                        'Бойко Борисов',
+                        'пандемия',
                         'околна среда'
                     ],
                     fn=text_searcher,
@@ -226,7 +237,8 @@ def main():
             fn=text_searcher,
             inputs=[
                 search_request_box,
-                search_type
+                search_type,
+                results_number
             ],
             outputs=[
                 search_info_box,
