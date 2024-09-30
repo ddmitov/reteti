@@ -278,11 +278,10 @@ def reteti_searcher(
 
     # Search criteria:
 
-    # 1. Only texts having the full set of unique tokens:
-    #    full_token_set_cte
-    # 2. Only texts having token frequency equal or higher than
-    #    the token frequency of the search request:
-    #    request_token_frequency_dataframe
+    # 1. Only texts having token frequency equal or higher than
+    #    the token frequency of the search request.
+    # 2. Only texts having the full set of unique tokens
+    #    presented in the search request.
 
     # Ranking criterion - number of matching tokens
 
@@ -292,26 +291,32 @@ def reteti_searcher(
     text_id_arrow_table = duckdb.sql(
         f'''
             WITH
-            full_token_set_cte AS (
-                SELECT
-                    text_id,
-                    COUNT(DISTINCT(token)) AS unique_tokens
-                FROM tokens_arrow_table
-                GROUP BY text_id
-                HAVING unique_tokens = {len(token_set)}
-            )
+                frequency_filtered_cte AS (
+                    SELECT
+                        tat.text_id AS text_id,
+                        tat.token AS token,
+                        tat.frequency AS frequency
+                    FROM
+                        tokens_arrow_table tat
+                        INNER JOIN request_token_frequency_dataframe rtfd ON
+                            tat.token = rtfd.token
+                            AND tat.frequency >= rtfd.frequency
+                ),
+
+                full_token_set_cte AS (
+                    SELECT
+                        text_id,
+                        COUNT(DISTINCT(token)) AS unique_tokens,
+                        SUM(frequency) AS matching_tokens
+                    FROM frequency_filtered_cte
+                    GROUP BY text_id
+                    HAVING unique_tokens = {len(token_set)}
+                )
 
             SELECT
-                tat.text_id,
-                SUM(CAST(tat.frequency AS INT)) AS matching_tokens
-            FROM
-                tokens_arrow_table tat
-                INNER JOIN full_token_set_cte ftsc ON
-                    ftsc.text_id = tat.text_id
-                INNER JOIN request_token_frequency_dataframe rtfd ON
-                    rtfd.token = tat.token
-                    AND rtfd.frequency >= tat.frequency
-            GROUP BY tat.text_id
+                text_id,
+                matching_tokens
+            FROM full_token_set_cte
             ORDER BY matching_tokens DESC
             LIMIT {token_search_limit}
         '''
