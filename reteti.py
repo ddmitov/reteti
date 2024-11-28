@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 import duckdb
 import pandas          as pd
 import pyarrow         as pa
+import pyarrow.compute as pc
 import pyarrow.fs      as fs
 import pyarrow.parquet as pq
 from tokenizers import Tokenizer
@@ -36,7 +37,7 @@ def reteti_logger_starter() -> logging.Logger:
 
 
 def reteti_batch_indexer(
-    text_batch_list: list,
+    text_batch_list:       list,
     metadata_column_names: list
 ) -> True:
     # Object storage settings:
@@ -71,7 +72,7 @@ def reteti_batch_indexer(
 
             # Iterate over all texts in a batch:
             for text in batch:
-                # Tokenize every text:
+                # Tokenize:
                 tokenized_text = tokenizer.encode(
                     sequence=str(text['text']),
                     add_special_tokens=False
@@ -80,9 +81,12 @@ def reteti_batch_indexer(
                 token_list = tokenized_text.ids
 
                 # Create a token sequence string for
-                # exact matching of search requests:
+                # exact match search requests:
                 token_sequence_string = \
                     '|' + '|'.join(map(str, token_list)) + '|'
+
+                # Count the total number of tokens in a text:
+                tokens_number = len(token_list)
 
                 # Prepare data for the text dataset:
                 text_item = {}
@@ -90,7 +94,9 @@ def reteti_batch_indexer(
                 text_item['text_id']        = int(text['text_id'])
                 text_item['text']           = str(text['text'])
                 text_item['token_sequence'] = token_sequence_string
+                text_item['tokens_number']  = tokens_number
 
+                # Add user-created metadata column:
                 for metadata_column_name in metadata_column_names:
                     text_item[metadata_column_name] = \
                         text[metadata_column_name]
@@ -112,7 +118,8 @@ def reteti_batch_indexer(
 
                     token_table_list.append(token_item)
 
-            # Add data to the text dataset:
+            # Add data to the text dataset.
+            # Any user-created metadata column are also added.
             texts_dataframe = pd.DataFrame(text_table_list)
 
             texts_arrow_table = duckdb.sql(
@@ -121,8 +128,9 @@ def reteti_batch_indexer(
                         text_id AS partition,
                         text_id,
                         token_sequence,
+                        tokens_number,
                         text,
-                        * EXCLUDE (text_id, token_sequence, text)
+                        * EXCLUDE (text_id, token_sequence, tokens_number, text)
                     FROM texts_dataframe
                 '''
             ).arrow()
@@ -217,11 +225,50 @@ def reteti_batch_indexer(
     return True
 
 
+def threaded_table_reader(
+    parquet_dataset_filesystem: fs.S3FileSystem,
+    token:                      int,
+    token_frequency:            int
+) -> pa.Table:
+    bucket = os.environ['BUCKET']
+
+    # If a token does not exist in the tokens dataset,
+    # this must not fail the script:
+    try:
+        token_arrow_table = pq.ParquetDataset(
+            f'{bucket}/tokens/{token}/',
+            filesystem=parquet_dataset_filesystem,
+            filters=[('token', '>=', token_frequency)]
+        ).read()
+
+        return token_arrow_table
+    except Exception:
+        pass
+
+
 def reteti_searcher(
-    token_list: list,
-    search_type: str,
-    results_number: int
+    token_list:     list,
+    search_type:    str,
+    results_number: int,
+    thread_pool:    object
 ) -> tuple[dict, dict]:
+    # Search criteria:
+
+    # 1. Only texts having token frequency equal or higher than
+    #    the token frequency of the search request.
+    # 2. Only texts having the full set of unique tokens
+    #    presented in the search request.
+
+    # Ranking criterion - matching tokens frequency
+
+    # Matching tokens frequency is
+    # the number of matching tokens in a document
+    # divided by
+    # the number of all tokens in the same document.
+
+    # Only the top N documents having
+    # the highest matching tokens frequency are selected.
+
     # Object storage settings:
     bucket = os.environ['BUCKET']
 
@@ -232,41 +279,34 @@ def reteti_searcher(
         scheme='http'
     )
 
-    # Step 1 - token search:
-    token_search_start_time = time.time()
+    # Step 1 - token extraction:
+    token_extraction_start_time = time.time()
 
-    token_set = set(token_list)
-    token_arrow_tables_list = []
-
-    # If any token is repeated in the search request,
+    # Request tokens are processed here as a set because
+    # if any token is repeated in the search request,
     # the respective token data in the dataset is read only once:
-    for token in token_set:
-        # If a token does not exist in the tokens dataset,
-        # this must not fail the extraction of the existing token data:
-        try:
-            token_arrow_table = pq.ParquetDataset(
-                f'{bucket}/tokens/{token}/',
-                filesystem=parquet_dataset_filesystem
-            ).read()
+    token_set = set(token_list)
 
-            token_arrow_tables_list.append(token_arrow_table)
-        except Exception:
-            pass
+    table_reader_arguments = [
+        (parquet_dataset_filesystem, token, token_list.count(token))
+        for token in token_set
+    ]
 
+    result = thread_pool.starmap_async(
+        threaded_table_reader,
+        table_reader_arguments
+    )
+
+    token_arrow_tables_list = result.get()
     tokens_arrow_table = pa.concat_tables(token_arrow_tables_list)
 
-    request_token_frequency_list = []
-
-    for token_id in set(token_list):
-        token_item = {}
-        token_item['token']     = int(token_id)
-        token_item['frequency'] = token_list.count(token_id)
-
-        request_token_frequency_list.append(token_item)
-
-    request_token_frequency_dataframe = pd.DataFrame(
-        request_token_frequency_list
+    token_extraction_time = round(
+        (time.time() - token_extraction_start_time),
+        3
     )
+
+    # Step 2 - token processing:
+    token_processing_start_time = time.time()
 
     token_search_limit = ''
 
@@ -276,55 +316,26 @@ def reteti_searcher(
     if search_type == 'Exact Match':
         token_search_limit = str(results_number * 10)
 
-    # Search criteria:
-
-    # 1. Only texts having token frequency equal or higher than
-    #    the token frequency of the search request.
-    # 2. Only texts having the full set of unique tokens
-    #    presented in the search request.
-
-    # Ranking criterion - number of matching tokens
-
-    # Only the top N document IDs having
-    # the highest number of matching tokens are selected.
-
     text_id_arrow_table = duckdb.sql(
         f'''
-            WITH
-                frequency_filtered_cte AS (
-                    SELECT
-                        tat.text_id AS text_id,
-                        tat.token AS token,
-                        tat.frequency AS frequency
-                    FROM
-                        tokens_arrow_table tat
-                        INNER JOIN request_token_frequency_dataframe rtfd ON
-                            tat.token = rtfd.token
-                            AND tat.frequency >= rtfd.frequency
-                ),
-
-                full_token_set_cte AS (
-                    SELECT
-                        text_id,
-                        COUNT(DISTINCT(token)) AS unique_tokens,
-                        SUM(frequency) AS matching_tokens
-                    FROM frequency_filtered_cte
-                    GROUP BY text_id
-                    HAVING unique_tokens = {len(token_set)}
-                )
-
             SELECT
                 text_id,
-                matching_tokens
-            FROM full_token_set_cte
+                COUNT(DISTINCT(token)) AS unique_tokens,
+                SUM(frequency) AS matching_tokens
+            FROM tokens_arrow_table
+            GROUP BY text_id
+            HAVING unique_tokens = {len(token_set)}
             ORDER BY matching_tokens DESC
             LIMIT {token_search_limit}
         '''
     ).arrow()
 
-    token_search_time = round((time.time() - token_search_start_time), 3)
+    token_processing_time = round(
+        (time.time() - token_processing_start_time),
+        3
+    )
 
-    # Step 2 - document search:
+    # Step 3 - document search:
     document_search_start_time = time.time()
 
     text_id_list = duckdb.query(
@@ -340,45 +351,51 @@ def reteti_searcher(
         text_parquet_path = f'{bucket}/texts/{text_id}/part-0.parquet'
         text_parquet_paths.append(text_parquet_path)
 
-    texts_arrow_table = pq.ParquetDataset(
-        text_parquet_paths,
-        filesystem=parquet_dataset_filesystem
-    ).read()
+    texts_arrow_table = None
 
-    token_sequence_string = '|'.join(map(str, token_list))
-
-    document_search_condition = ''
+    if search_type == 'Approximate Match':
+        texts_arrow_table = pq.ParquetDataset(
+            text_parquet_paths,
+            filesystem=parquet_dataset_filesystem,
+        ).read()
 
     if search_type == 'Exact Match':
-        document_search_condition = \
-            f"WHERE token_sequence LIKE '%{token_sequence_string}%'"
+        token_sequence_string = '|'.join(map(str, token_list))
+
+        texts_arrow_table = pq.ParquetDataset(
+            text_parquet_paths,
+            filesystem=parquet_dataset_filesystem,
+        ).read().filter(
+            pc.match_substring(
+                pc.field('token_sequence'),
+                token_sequence_string
+            )
+        )
 
     search_result_dataframe = None
-    search_result           = None
 
     try:
         search_result_dataframe = duckdb.query(
             f'''
                 SELECT
+                    CAST(tiat.matching_tokens AS INT) AS matching_tokens,
+                    CAST(tat.tokens_number AS INT) AS total_tokens,
                     ROUND(
-                        (
-                            CAST(tiat.matching_tokens AS NUMERIC)
-                            /
-                            CAST(
-                                LEN(STRING_SPLIT(tat.token_sequence, '|')
-                            ) AS NUMERIC)
-                        ),
+                        (matching_tokens / total_tokens),
                         5
-                    ) AS token_frequency,
-                    tat.text_id,
-                    tat.* EXCLUDE (text_id, token_sequence, text),
-                    tat.text
+                    ) AS matching_tokens_frequency,
+                    tat.* EXCLUDE (
+                        token_sequence,
+                        tokens_number,
+                        text
+                    ),
+                    tat.text AS text
                 FROM
                     text_id_arrow_table tiat
                     LEFT JOIN texts_arrow_table tat ON
                         tat.text_id = tiat.text_id
-                {document_search_condition}
-                ORDER BY token_frequency DESC
+                WHERE tat.text IS NOT NULL
+                ORDER BY matching_tokens_frequency DESC
                 LIMIT {str(results_number)}
             '''
         ).fetch_arrow_table().to_pandas()
@@ -386,10 +403,14 @@ def reteti_searcher(
         print(exception)
         pass
 
+    search_result = None
+
     if search_result_dataframe is None:
         search_result = {}
         search_result['Message:'] = 'No matching texts were found.'
 
+    # The results dataframe is converted to
+    # a numbered list of dictionaries with numbers starting from 1:
     if search_result_dataframe is not None:
         search_result_index = range(1, len(search_result_dataframe) + 1)
         search_result_list = search_result_dataframe.to_dict('records')
@@ -400,15 +421,16 @@ def reteti_searcher(
             search_result[str(index)] = element
 
     document_search_time = round((time.time() - document_search_start_time), 3)
-    total_time = round((token_search_time + document_search_time), 3)
 
-    token_search_label    = 'Token search .. runtime in seconds:'
-    document_search_label = 'Document search runtime in seconds:'
-    total_label           = 'Total ......... runtime in seconds:'
+    total_time = round(
+        (token_extraction_time + token_processing_time + document_search_time),
+        3
+    )
 
     search_info = {}
-    search_info[token_search_label] = token_search_time
-    search_info[document_search_label] = document_search_time
-    search_info[total_label]   = total_time
+    search_info['Token extraction . in seconds'] = token_extraction_time
+    search_info['Token processing . in seconds'] = token_processing_time
+    search_info['Document search .. in seconds'] = document_search_time
+    search_info['Total runtime .... in seconds'] = total_time
 
     return search_info, search_result

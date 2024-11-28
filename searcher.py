@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 
+# Core modules:
 import datetime
+from multiprocessing import cpu_count
+from multiprocessing.pool import ThreadPool
 import os
 import signal
 import time
 import threading
 
+# PIP modules:
 from dotenv import find_dotenv
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -13,6 +17,7 @@ import gradio as gr
 from tokenizers import Tokenizer
 import uvicorn
 
+# Private module:
 from reteti import reteti_searcher
 
 # Load settings from .env file:
@@ -21,6 +26,8 @@ load_dotenv(find_dotenv())
 # Global variables:
 tokenizer     = None
 last_activity = None
+
+thread_pool = ThreadPool(cpu_count())
 
 
 def text_searcher(
@@ -45,7 +52,8 @@ def text_searcher(
     search_info, search_result = reteti_searcher(
         search_request_tokenized,
         search_type,
-        results_number
+        results_number,
+        thread_pool
     )
 
     return search_info, search_result
@@ -158,8 +166,8 @@ def main():
         with gr.Row():
             gr.Markdown(
                 '''
-                # Reteti Demo
-                ## Scale to Zero and Serverless Keyword Search
+                # Reteti
+                ## Scale to Zero or Serverless Keyword Search
                 '''
             )
 

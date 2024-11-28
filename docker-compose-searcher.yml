@@ -1,0 +1,43 @@
+name: reteti
+
+# docker compose --file docker-compose-searcher.yml down --rmi all
+# RETETI_UID="$(id -u)" RETETI_GID="$(id -g)" docker compose --file docker-compose-searcher.yml up --remove-orphans
+
+services:
+  minio:
+    image: minio/minio
+    user: "${RETETI_UID}:${RETETI_GID}"
+    networks:
+      - savanna
+    hostname: minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    env_file: ".env"
+    environment:
+      - MINIO_ROOT_USER=${ACCESS_KEY_ID}
+      - MINIO_ROOT_PASSWORD=${SECRET_ACCESS_KEY}
+    volumes:
+      - ./data/minio:/data
+    command: server /data --address ":9000" --console-address ":9001"
+
+  searcher:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    user: "${RETETI_UID}:${RETETI_GID}"
+    networks:
+      - savanna
+    ports:
+      - "7860:7860"
+    env_file: ".env"
+    volumes:
+      - .:/app
+    command: python /app/searcher.py
+    depends_on:
+      minio:
+        condition: service_started
+
+networks:
+  savanna:
+    driver: bridge

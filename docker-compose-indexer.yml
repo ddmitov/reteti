@@ -1,0 +1,63 @@
+name: reteti
+
+# docker compose down --rmi all
+# RETETI_UID="$(id -u)" RETETI_GID="$(id -g)" docker compose up --file docker-compose-indexer.yml --remove-orphans
+
+services:
+  minio:
+    image: minio/minio
+    user: "${RETETI_UID}:${RETETI_GID}"
+    networks:
+      - savanna
+    hostname: minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    env_file: ".env"
+    environment:
+      - MINIO_ROOT_USER=${ACCESS_KEY_ID}
+      - MINIO_ROOT_PASSWORD=${SECRET_ACCESS_KEY}
+    volumes:
+      - ./data/minio:/data
+    command: server /data --address ":9000" --console-address ":9001"
+
+  bucket-maker:
+    image: minio/mc
+    user: "${RETETI_UID}:${RETETI_GID}"
+    networks:
+      - savanna
+    env_file: ".env"
+    volumes:
+      - ./data:/data
+    depends_on:
+      minio:
+        condition: service_started
+    entrypoint: >
+      /bin/sh -ce "
+        mkdir /data/mc_cfg;
+        /usr/bin/mc --config-dir /data/mc_cfg config host add minio http://minio:9000 ${ACCESS_KEY_ID} ${SECRET_ACCESS_KEY};
+        /usr/bin/mc --config-dir /data/mc_cfg mb minio/reteti;
+        rm -rf /data/mc_cfg;
+        exit 0;
+      "
+
+  index-maker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    user: "${RETETI_UID}:${RETETI_GID}"
+    networks:
+      - savanna
+    env_file: ".env"
+    volumes:
+      - .:/app
+    depends_on:
+      bucket-maker:
+        condition: service_completed_successfully
+    volumes:
+      - .:/app
+    command: python /app/indexer.py
+
+networks:
+  savanna:
+    driver: bridge

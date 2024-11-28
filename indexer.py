@@ -8,8 +8,8 @@ from huggingface_hub import hf_hub_download
 from reteti import reteti_batch_indexer
 
 # Input data settings:
-TEXTS_NUMBER           = 100000
-TEXTS_PER_BATCH_NUMBER =   5000
+TEXTS_NUMBER           = 500000
+TEXTS_PER_BATCH_NUMBER =  10000
 
 
 def batch_generator(item_list: list, items_per_batch: int):
