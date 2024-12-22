@@ -1,7 +1,6 @@
-name: reteti
+name: reteti-indexer
 
-# docker compose down --rmi all
-# RETETI_UID="$(id -u)" RETETI_GID="$(id -g)" docker compose up --file docker-compose-indexer.yml --remove-orphans
+# RETETI_UID="$(id -u)" RETETI_GID="$(id -g)" docker compose --file docker-compose-indexer.yml up --remove-orphans
 
 services:
   minio:
@@ -21,25 +20,25 @@ services:
       - ./data/minio:/data
     command: server /data --address ":9000" --console-address ":9001"
 
-  bucket-maker:
-    image: minio/mc
-    user: "${RETETI_UID}:${RETETI_GID}"
-    networks:
-      - savanna
-    env_file: ".env"
-    volumes:
-      - ./data:/data
-    depends_on:
-      minio:
-        condition: service_started
-    entrypoint: >
-      /bin/sh -ce "
-        mkdir /data/mc_cfg;
-        /usr/bin/mc --config-dir /data/mc_cfg config host add minio http://minio:9000 ${ACCESS_KEY_ID} ${SECRET_ACCESS_KEY};
-        /usr/bin/mc --config-dir /data/mc_cfg mb minio/reteti;
-        rm -rf /data/mc_cfg;
-        exit 0;
-      "
+  # bucket-maker:
+  #   image: minio/mc
+  #   user: "${RETETI_UID}:${RETETI_GID}"
+  #   networks:
+  #     - savanna
+  #   env_file: ".env"
+  #   volumes:
+  #     - ./data:/data
+  #   depends_on:
+  #     minio:
+  #       condition: service_started
+  #   entrypoint: >
+  #     /bin/sh -ce "
+  #       mkdir /data/mc_cfg;
+  #       /usr/bin/mc --config-dir /data/mc_cfg config host add minio http://minio:9000 ${ACCESS_KEY_ID} ${SECRET_ACCESS_KEY};
+  #       /usr/bin/mc --config-dir /data/mc_cfg mb minio/reteti;
+  #       rm -rf /data/mc_cfg;
+  #       exit 0;
+  #     "
 
   index-maker:
     build:
@@ -51,12 +50,12 @@ services:
     env_file: ".env"
     volumes:
       - .:/app
-    depends_on:
-      bucket-maker:
-        condition: service_completed_successfully
+    # depends_on:
+    #   bucket-maker:
+    #     condition: service_completed_successfully
     volumes:
       - .:/app
-    command: python /app/indexer.py
+    command: python /app/demo_indexer.py
 
 networks:
   savanna:

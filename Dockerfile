@@ -21,14 +21,15 @@ RUN pip install --no-cache huggingface-hub
 # Gradio demo application:
 RUN pip install --no-cache gradio
 
-RUN mkdir /home/reteti
-COPY ./.env        /home/reteti/.env
-COPY ./reteti.py   /home/reteti/reteti.py
-COPY ./searcher.py /home/reteti/searcher.py
+# RUN mkdir /home/reteti
+# COPY ./.env        /home/reteti/.env
+# COPY ./reteti.py   /home/reteti/reteti.py
+# COPY ./searcher.py /home/reteti/demo_searcher.py
 
 # Start the Gradio demo application by default:
 EXPOSE 7860
-CMD ["python", "/home/reteti/searcher.py"]
+# CMD ["python", "/home/reteti/demo_searcher.py"]
+
 
 # docker build -t reteti .
 # docker buildx build -t reteti .

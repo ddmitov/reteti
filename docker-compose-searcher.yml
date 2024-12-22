@@ -1,6 +1,5 @@
-name: reteti
+name: reteti-searcher
 
-# docker compose --file docker-compose-searcher.yml down --rmi all
 # RETETI_UID="$(id -u)" RETETI_GID="$(id -g)" docker compose --file docker-compose-searcher.yml up --remove-orphans
 
 services:
@@ -33,7 +32,7 @@ services:
     env_file: ".env"
     volumes:
       - .:/app
-    command: python /app/searcher.py
+    command: python /app/demo_searcher.py
     depends_on:
       minio:
         condition: service_started
