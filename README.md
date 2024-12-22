@@ -23,7 +23,7 @@ Reteti selects the ID numbers of texts that match the following criteria:
 
 ### Ranking Criterion: Matching Tokens Frequency
 
-The matching tokens frequency is the number of retrieved search request tokens divided by the number of all tokens in a document. Short documents with high number of matching tokens are at the top of the results list.
+The matching tokens frequency is the number of matching search request tokens divided by the number of all tokens in a document. Short documents with high number of matching tokens are at the top of the results list.
 
 ## [Thanks and Credits](./CREDITS.md)
 
