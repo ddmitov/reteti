@@ -4,8 +4,8 @@
 from   datetime import datetime
 from   datetime import timedelta
 import logging
-from   time   import time
-from   typing import List
+from   time     import time
+from   typing   import List
 
 # PIP modules:
 import duckdb
@@ -223,28 +223,48 @@ def reteti_searcher(
                         text_id,
                         token,
                         single_token_frequency,
-                        position - LAG(position) OVER(
+                        LEAD(
+                            position,
+                            {str(len(token_list) - 1)}
+                        ) OVER(
                             PARTITION BY text_id
                             ORDER BY position ASC
-                        ) AS distance_to_previous,
-                        LEAD(position) OVER(
+                        ) - position AS distance_to_end,
+                        position - LAG(
+                            position,
+                            {str(len(token_list) - 1)}
+                        ) OVER(
                             PARTITION BY text_id
                             ORDER BY position ASC
-                        ) - position AS distance_to_next,
+                        ) AS distance_to_start
                     FROM positions
                 )
 
             SELECT
                 text_id,
-                ROUND(SUM(single_token_frequency), 5) AS mtf,
-                FIRST(single_token_frequency) AS stf,
-                COUNT(token) AS mt
+                COUNT(token) / 2 AS hits,
+                (COUNT(token) / 2) * {str(len(token_list))} AS matching_tokens,
+                FIRST(single_token_frequency) AS single_token_frequency,
+                ROUND(
+                    (
+                        (SUM(single_token_frequency) / 2)
+                        *
+                        {str(len(token_list))}
+                    ),
+                    5
+                ) AS matching_tokens_frequency
             FROM distances
             WHERE
-                distance_to_previous = 1
-                OR distance_to_next = 1
+                (
+                    token = {str(token_list[0])}
+                    AND distance_to_end = {str(len(token_list) - 1)}
+                )
+                OR (
+                    token = {str(token_list[-1])}
+                    AND distance_to_start  = {str(len(token_list) - 1)}
+                )
             GROUP BY text_id
-            ORDER BY mtf DESC
+            ORDER BY matching_tokens_frequency DESC
             LIMIT {str(results_number)}
         '''
     ).arrow()
@@ -424,9 +444,10 @@ def reteti_text_extractor(
         search_result_dataframe = duckdb.query(
             f'''
                 SELECT
-                    tiat.mtf AS matching_tokens_frequency,
-                    tiat.stf AS single_token_frequency,
-                    tiat.mt  AS matching_tokens,
+                    tiat.matching_tokens_frequency,
+                    tiat.single_token_frequency,
+                    tiat.matching_tokens,
+                    tiat.hits,
                     tat.* EXCLUDE (text),
                     tat.text
                 FROM

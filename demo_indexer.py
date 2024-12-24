@@ -217,7 +217,7 @@ def main():
         datetime.timedelta(seconds=total_indexing_time)
     )
 
-    message = f'All documents indexed for {total_indexing_time_string}'
+    message = f'All texts processed for {total_indexing_time_string}'
 
     print(message, flush=True)
     logger.info(message)

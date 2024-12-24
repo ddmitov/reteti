@@ -214,7 +214,7 @@ def main():
             gr.Markdown(
                 '''
                 # Reteti
-                ## Keyword Search based on Object Storage
+                ## Lexical Search based on Object Storage
                 '''
             )
 

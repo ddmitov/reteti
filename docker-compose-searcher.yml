@@ -1,6 +1,6 @@
 name: reteti-searcher
 
-# RETETI_UID="$(id -u)" RETETI_GID="$(id -g)" docker compose --file docker-compose-searcher.yml up --remove-orphans
+# RETETI_UID="$(id -u)" RETETI_GID="$(id -g)" docker compose --file docker-compose-searcher.yml up
 
 services:
   minio:
