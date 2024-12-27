@@ -19,7 +19,7 @@ Reteti selects the ID numbers of texts that match the following criteria:
 
 * **1.** They have token occurences equal or higher than the token occurences of the search request.
 * **2.** They have the full set of unique tokens presented in the search request.
-* **3.** They have one or more sequences of all tokens from the search request positioned next to each other without gaps having first an last token matching the first and last token of the search request.
+* **3.** They have one or more sequences of all tokens from the search request positioned next to each other without gaps having first and last token matching the first and last token of the search request.
 
 ### Ranking Criterion: Matching Tokens Frequency
 

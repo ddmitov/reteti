@@ -59,8 +59,9 @@ def text_searcher(
     # Initialize Parquet dataset filesystem in object storage:
     dataset_filesystem = dataset_filesystem_starter()
 
-    # Object storage bucket:
-    bucket = os.environ['BUCKET']
+    # Object storage buckets:
+    index_bucket = os.environ['INDEX_COMPACT_BUCKET']
+    texts_bucket = os.environ['TEXTS_BUCKET']
 
     # Step 1 - token data extraction:
     token_search_start = time.time()
@@ -68,7 +69,8 @@ def text_searcher(
     # Search:
     text_id_arrow_table = reteti_searcher(
         dataset_filesystem,
-        bucket,
+        index_bucket,
+        'compact',
         tokenizer,
         search_request,
         results_number,
@@ -81,7 +83,7 @@ def text_searcher(
 
     text_result_dataframe = reteti_text_extractor(
         dataset_filesystem,
-        bucket,
+        texts_bucket,
         text_id_arrow_table,
         thread_pool
     )
@@ -126,7 +128,9 @@ def activity_inspector():
     thread.daemon = True
     thread.start()
 
-    if time.time() - last_activity > int(os.environ['INACTIVITY_MAXIMUM_SECONDS']):
+    inactivity_maximum = int(os.environ['INACTIVITY_MAXIMUM_SECONDS'])
+
+    if time.time() - last_activity > inactivity_maximum:
         print(f'Initiated shutdown sequence at: {datetime.datetime.now()}')
 
         os.kill(os.getpid(), signal.SIGINT)

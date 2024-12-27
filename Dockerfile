@@ -13,10 +13,12 @@ RUN mkdir     /tokenizer
 RUN chmod 777 /tokenizer
 
 COPY ./tokenizer_downloader.py /etc/tokenizer_downloader.py
-RUN python3 /etc/tokenizer_downloader.py
+RUN  python3 /etc/tokenizer_downloader.py
 
-# Testing dataset:
-RUN pip install --no-cache huggingface-hub
+# Demo-related modules:
+RUN pip install --no-cache \
+    minio                  \
+    huggingface-hub
 
 # Gradio demo application:
 RUN pip install --no-cache gradio

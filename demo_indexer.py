@@ -11,6 +11,7 @@ from   dotenv          import find_dotenv
 from   dotenv          import load_dotenv
 import duckdb
 from   huggingface_hub import hf_hub_download
+from   minio           import Minio
 import pyarrow         as     pa
 import pyarrow.fs      as     fs
 
@@ -18,6 +19,7 @@ import pyarrow.fs      as     fs
 from reteti import reteti_logger_starter
 from reteti import reteti_indexer
 from reteti import reteti_text_writer
+from reteti import reteti_index_compactor
 
 ROWS_PER_BATCH = 10000
 
@@ -162,18 +164,38 @@ def main():
     # Start logging: 
     logger = reteti_logger_starter()
 
+    # Create buckets if they don't exist:
+    minio_client = Minio(
+        'minio:9000',
+        access_key = os.environ['ACCESS_KEY_ID'],
+        secret_key = os.environ['SECRET_ACCESS_KEY'],
+        secure     = False
+    )
+
+    if not minio_client.bucket_exists(os.environ['INDEX_BUCKET']):
+        minio_client.make_bucket(os.environ['INDEX_BUCKET'])
+
+    if not minio_client.bucket_exists(os.environ['INDEX_COMPACT_BUCKET']):
+        minio_client.make_bucket(os.environ['INDEX_COMPACT_BUCKET'])
+
+    if not minio_client.bucket_exists(os.environ['TEXTS_BUCKET']):
+        minio_client.make_bucket(os.environ['TEXTS_BUCKET'])
+
     # Initialize Parquet dataset filesystem in object storage:
     dataset_filesystem = dataset_filesystem_starter()
 
-    # Object storage bucket:
-    bucket = os.environ['BUCKET']
+    # Object storage buckets:
+    index_bucket = os.environ['INDEX_BUCKET']
+    index_compact_bucket = os.environ['INDEX_COMPACT_BUCKET']
+    texts_bucket = os.environ['TEXTS_BUCKET']
+
+    # Start measuring processing time:
+    total_processing_start = time.time()
 
     # Pre-process input texts and group them in batches:
     temp_file_names = data_preprocessor()
 
     # Index all text batches:
-    total_indexing_start = time.time()
-
     metadata_column_names = ['title', 'date']
 
     temp_file_number = 0
@@ -194,7 +216,7 @@ def main():
 
         reteti_text_writer(
             dataset_filesystem,
-            bucket,
+            texts_bucket,
             len(temp_file_names),
             temp_file_number,
             texts_list,
@@ -203,21 +225,26 @@ def main():
 
         reteti_indexer(
             dataset_filesystem,
-            bucket,
+            index_bucket,
             len(temp_file_names),
             temp_file_number,
             texts_list,
             metadata_column_names
         )
 
-    total_indexing_end = time.time()
-    total_indexing_time = round((total_indexing_end - total_indexing_start), 3)
-
-    total_indexing_time_string = str(
-        datetime.timedelta(seconds=total_indexing_time)
+    reteti_index_compactor(
+        dataset_filesystem,
+        index_bucket,
+        index_compact_bucket
     )
 
-    message = f'All texts processed for {total_indexing_time_string}'
+    total_processing_time = round((time.time() - total_processing_start), 3)
+
+    total_processing_time_string = str(
+        datetime.timedelta(seconds=total_processing_time)
+    )
+
+    message = f'All texts processed for {total_processing_time_string}'
 
     print(message, flush=True)
     logger.info(message)

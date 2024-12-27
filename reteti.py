@@ -40,6 +40,13 @@ def reteti_indexer(
     batch:                 List[dict],
     metadata_column_names: list
 ) -> True:
+    token_paths = []
+
+
+    def tokens_file_visitor(written_file):
+        token_paths.append(written_file.path)
+
+
     # Start logging: 
     logger = reteti_logger_starter()
 
@@ -98,7 +105,7 @@ def reteti_indexer(
     tokens_dataframe = pd.DataFrame(token_table_list)
 
     token_arrow_table = duckdb.sql(
-        f'''
+        '''
             SELECT
                 token AS partition,
                 token,
@@ -107,16 +114,16 @@ def reteti_indexer(
                 positions,
                 single_token_frequency
             FROM tokens_dataframe
-            ORDER BY token ASC
+            ORDER BY partition ASC
         '''
     ).arrow()
 
-    unique_tokens_number = duckdb.query(
-        f'''
-            SELECT COUNT(DISTINCT token) AS tokens
+    unique_partitions_number = duckdb.query(
+        '''
+            SELECT COUNT(DISTINCT partition) AS partitions
             FROM token_arrow_table
         '''
-    ).fetch_arrow_table().to_pandas()['tokens'].iloc[0]
+    ).fetch_arrow_table().to_pandas()['partitions'].iloc[0]
 
     diff_string = datetime.now().strftime('%Y-%m-%d--%H-%M-%S').strip()
 
@@ -127,7 +134,28 @@ def reteti_indexer(
         partitioning           = ['partition'],
         basename_template      = 'part-{{i}}--{}.parquet'.format(diff_string),
         existing_data_behavior = 'overwrite_or_ignore',
-        max_partitions         = int(unique_tokens_number)
+        max_partitions         = int(unique_partitions_number),
+        file_visitor           = tokens_file_visitor
+    )
+
+    # Add data to the metadata dataset:
+    token_path_dataframe = pd.DataFrame(token_paths, columns=['path'])
+
+    token_arrow_table = duckdb.sql(
+        '''
+            SELECT
+                path,
+                REGEXP_EXTRACT(path, '\\d{1,10}') AS token
+            FROM token_path_dataframe
+        '''
+    ).arrow()
+
+    pq.write_to_dataset(
+        token_arrow_table,
+        filesystem             = dataset_filesystem,
+        root_path              = f'{bucket}/metadata/paths',
+        basename_template      = 'part-{{i}}--{}.parquet'.format(diff_string),
+        existing_data_behavior = 'overwrite_or_ignore'
     )
 
     # Calculate, display and log processing time:
@@ -145,17 +173,104 @@ def reteti_indexer(
     return True
 
 
-def reteti_token_reader(
-    bucket:             str,
+def reteti_index_compactor(
+    dataset_filesystem:   fs.S3FileSystem,
+    index_bucket:         str,
+    compact_index_bucket: str
+) -> True:
+    path_arrow_table = pq.ParquetDataset(
+        f'{index_bucket}/metadata/paths/',
+        filesystem = dataset_filesystem,
+    ).read()
+
+    unique_token_list = duckdb.query(
+        '''
+            SELECT token
+            FROM path_arrow_table
+            GROUP BY token
+            ORDER BY token ASC
+        '''
+    ).fetch_arrow_table().to_pandas()['token']
+
+    token_number = 0
+
+    for token in unique_token_list:
+        token_number += 1
+
+        token_arrow_table = pq.ParquetDataset(
+            f'{index_bucket}/tokens/{token}/',
+            filesystem = dataset_filesystem
+        ).read()
+
+        pq.write_table(
+            token_arrow_table,
+            f'{compact_index_bucket}/tokens/{token}/{token}.parquet',
+            filesystem = dataset_filesystem
+        )
+
+        message = (
+            f'{str(token_number)}/{str(len(unique_token_list))} - ' +
+            f'compacted data for token {token}'
+        )
+
+        print(message)
+
+    # Add data to the metadata dataset:
+    token_dataframe = pd.DataFrame(unique_token_list, columns=['token'])
+
+    token_arrow_table = duckdb.sql(
+        '''
+            SELECT token
+            FROM token_dataframe
+        '''
+    ).arrow()
+
+    pq.write_table(
+        token_arrow_table,
+        f'{compact_index_bucket}/metadata/tokens/tokens.parquet',
+        filesystem = dataset_filesystem
+    )
+
+    return True
+
+
+def reteti_compact_token_index_reader(
     dataset_filesystem: fs.S3FileSystem,
-    token:              int,
+    token_paths:        list,
+    token_dict:         dict
+) -> pa.Table:
+    filters = []
+
+    for token, occurrences in token_dict.items():
+        token_filter = []
+
+        token_tuple = ('token', '=', token)
+        token_filter.append(token_tuple)
+
+        occurences_tuple = ('occurrences', '>=', occurrences)
+        token_filter.append(occurences_tuple)
+
+        filters.append(token_filter)
+
+    token_arrow_table = pq.ParquetDataset(
+        token_paths,
+        filesystem = dataset_filesystem,
+        filters    = filters
+    ).read()
+
+    return token_arrow_table
+
+
+def reteti_multifile_token_index_reader(
+    dataset_filesystem: fs.S3FileSystem,
+    token_path:         str,
     token_occurrences:  int
 ) -> pa.Table:
     # If a token does not exist in the dataset,
     # this must not fail the application:
     try:
         token_arrow_table = pq.ParquetDataset(
-            f'{bucket}/tokens/{token}/',
+            token_path,
             filesystem = dataset_filesystem,
             filters    = [('occurrences', '>=', token_occurrences)]
         ).read()
@@ -168,6 +283,7 @@ def reteti_token_reader(
 def reteti_searcher(
     dataset_filesystem: fs.S3FileSystem,
     bucket:             str,
+    index_type:         str,
     tokenizer:          object,
     search_request:     str,
     results_number:     int,
@@ -183,18 +299,43 @@ def reteti_searcher(
     # reading the data of the repeated tokens multiple times:
     token_set = set(token_list)
 
-    token_data_reader_arguments = [
-        (bucket, dataset_filesystem, token, token_list.count(token))
-        for token in token_set
-    ]
+    token_arrow_table = None
 
-    token_result = thread_pool.starmap_async(
-        reteti_token_reader,
-        token_data_reader_arguments
-    )
+    if index_type == 'multifile':
+        token_paths = []
 
-    token_arrow_tables_list = token_result.get()
-    token_arrow_table = pa.concat_tables(token_arrow_tables_list)
+        for token in token_set:
+            token_path = f'{bucket}/tokens/{token}/'
+            token_paths.append(token_path)
+
+        token_data_reader_arguments = [
+            (dataset_filesystem, token_path, token_list.count(token))
+            for token_path in token_paths
+        ]
+
+        token_result = thread_pool.starmap_async(
+            reteti_multifile_token_index_reader,
+            token_data_reader_arguments
+        )
+
+        token_arrow_tables_list = token_result.get()
+        token_arrow_table = pa.concat_tables(token_arrow_tables_list)
+
+    if index_type == 'compact':
+        token_paths = []
+        token_dict  = {}
+
+        for token in token_set:
+            token_path = f'{bucket}/tokens/{token}/{token}.parquet'
+            token_paths.append(token_path)
+
+            token_dict[token] = token_list.count(token)
+
+        token_arrow_table = reteti_compact_token_index_reader(
+            dataset_filesystem,
+            token_paths,
+            token_dict
+        )
 
     text_id_arrow_table = duckdb.sql(
         f'''
@@ -242,15 +383,16 @@ def reteti_searcher(
 
             SELECT
                 text_id,
-                COUNT(token) / 2 AS hits,
-                (COUNT(token) / 2) * {str(len(token_list))} AS matching_tokens,
+                CASE
+                    WHEN {str(len(token_list))} = 1
+                        THEN COUNT(token)
+                    WHEN {str(len(token_list))} > 1
+                        THEN FLOOR(COUNT(token) / 2)
+                END AS hits,
+                hits * {str(len(token_list))} AS matching_tokens,
                 FIRST(single_token_frequency) AS single_token_frequency,
                 ROUND(
-                    (
-                        (SUM(single_token_frequency) / 2)
-                        *
-                        {str(len(token_list))}
-                    ),
+                    (FIRST(single_token_frequency) * matching_tokens),
                     5
                 ) AS matching_tokens_frequency
             FROM distances
@@ -315,7 +457,7 @@ def reteti_text_writer(
                 CONCAT(
                     LPAD(
                         CAST(
-                            (TEXT_ID // {str(partition_size)})
+                            (text_id // {str(partition_size)})
                             *
                             {str(partition_size)}
                             AS VARCHAR
@@ -325,7 +467,7 @@ def reteti_text_writer(
                     '-',
                     LPAD(
                         CAST(
-                            (TEXT_ID // {str(partition_size)})
+                            (text_id // {str(partition_size)})
                             *
                             {str(partition_size)}
                             +
@@ -343,7 +485,7 @@ def reteti_text_writer(
     ).arrow()
 
     text_id_total = duckdb.query(
-        f'''
+        '''
             SELECT COUNT(text_id) AS text_id_total
             FROM text_arrow_table
         '''
@@ -409,13 +551,13 @@ def reteti_text_extractor(
 
     for text_id in text_id_list:
         partition_size = 100
-        
+
         partition_start = int(text_id) // partition_size * partition_size
         partition_end   = partition_start + partition_size - 1
 
         partition_start_string = str(partition_start).rjust(9, '0')
         partition_end_string   = str(partition_end).rjust(9, '0')
-        
+
         partition = f'{partition_start_string}-{partition_end_string}'
 
         text_path = f'{bucket}/texts/{partition}/'
@@ -442,7 +584,7 @@ def reteti_text_extractor(
 
     if text_id_arrow_table is not None and text_arrow_table is not None:
         search_result_dataframe = duckdb.query(
-            f'''
+            '''
                 SELECT
                     tiat.matching_tokens_frequency,
                     tiat.single_token_frequency,
