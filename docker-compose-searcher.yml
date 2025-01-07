@@ -14,8 +14,8 @@ services:
       - "9001:9001"
     env_file: ".env"
     environment:
-      - MINIO_ROOT_USER=${ACCESS_KEY_ID}
-      - MINIO_ROOT_PASSWORD=${SECRET_ACCESS_KEY}
+      - MINIO_ROOT_USER=${LOCAL_ACCESS_KEY_ID}
+      - MINIO_ROOT_PASSWORD=${LOCAL_SECRET_ACCESS_KEY}
     volumes:
       - ./data/minio:/data
     command: server /data --address ":9000" --console-address ":9001"

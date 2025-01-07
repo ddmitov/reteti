@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# Core modules:
+# Python core modules:
 import datetime
 from   multiprocessing      import cpu_count
 from   multiprocessing.pool import ThreadPool
@@ -9,7 +9,7 @@ import signal
 import time
 import threading
 
-# PIP modules:
+# Python PIP modules:
 from   dotenv     import find_dotenv
 from   dotenv     import load_dotenv
 from   fastapi    import FastAPI
@@ -18,9 +18,11 @@ import gradio     as     gr
 from   tokenizers import Tokenizer
 import uvicorn
 
-# Private module:
-from reteti import reteti_searcher
-from reteti import reteti_text_extractor
+# Reteti core module:
+from reteti_core import reteti_searcher
+
+# Reteti supplementary module:
+from reteti_text import reteti_text_extractor
 
 # Global variables:
 tokenizer     = None
@@ -34,12 +36,24 @@ load_dotenv(find_dotenv())
 
 
 def dataset_filesystem_starter() -> fs.S3FileSystem:
-    dataset_filesystem = fs.S3FileSystem(
-        endpoint_override = os.environ['ENDPOINT_S3'],
-        access_key        = os.environ['ACCESS_KEY_ID'],
-        secret_key        = os.environ['SECRET_ACCESS_KEY'],
-        scheme            = 'http'
-    )
+    dataset_filesystem = None
+
+    # Object storage settings for Fly.io deployment:
+    if os.environ.get('FLY_APP_NAME') is not None:
+        dataset_filesystem = fs.S3FileSystem(
+            endpoint_override = os.environ['TIGRIS_ENDPOINT_S3'],
+            access_key        = os.environ['TIGRIS_ACCESS_KEY_ID'],
+            secret_key        = os.environ['TIGRIS_SECRET_ACCESS_KEY'],
+            scheme            = 'https'
+        )
+    # Object storage settings for local development:
+    else:
+        dataset_filesystem = fs.S3FileSystem(
+            endpoint_override = os.environ['LOCAL_ENDPOINT_S3'],
+            access_key        = os.environ['LOCAL_ACCESS_KEY_ID'],
+            secret_key        = os.environ['LOCAL_SECRET_ACCESS_KEY'],
+            scheme            = 'http'
+        )
 
     return dataset_filesystem
 
@@ -60,7 +74,7 @@ def text_searcher(
     dataset_filesystem = dataset_filesystem_starter()
 
     # Object storage buckets:
-    index_bucket = os.environ['INDEX_COMPACT_BUCKET']
+    index_bucket = os.environ['INDEX_BUCKET']
     texts_bucket = os.environ['TEXTS_BUCKET']
 
     # Step 1 - token data extraction:
@@ -70,7 +84,6 @@ def text_searcher(
     text_id_arrow_table = reteti_searcher(
         dataset_filesystem,
         index_bucket,
-        'compact',
         tokenizer,
         search_request,
         results_number,
@@ -137,13 +150,6 @@ def activity_inspector():
 
 
 def main():
-    # Object storage settings:
-    os.environ['AWS_ENDPOINT']          = os.environ['ENDPOINT_S3']
-    os.environ['AWS_ACCESS_KEY_ID']     = os.environ['ACCESS_KEY_ID']
-    os.environ['AWS_SECRET_ACCESS_KEY'] = os.environ['SECRET_ACCESS_KEY']
-    os.environ['AWS_REGION']            = 'us-east-1'
-    os.environ['ALLOW_HTTP']            = 'True'
-
     # Matplotlib writable config directory,
     # Matplotlib is a dependency of Gradio:
     os.environ['MPLCONFIGDIR'] = '/app/data/.config/matplotlib'
@@ -156,17 +162,17 @@ def main():
     os.environ['GRADIO_ANALYTICS_ENABLED'] = 'False'
 
     # Define Gradio user interface:
-    search_request_box=gr.Textbox(lines=1, label='Search Request')
+    search_request_box = gr.Textbox(lines = 1, label = 'Search Request')
 
     results_number = gr.Dropdown(
         [10, 20, 50],
-        label="Number of Search Results",
-        value=10
+        label = "Number of Search Results",
+        value = 10
     )
 
-    search_info_box=gr.JSON(label='Search Info', show_label=True)
+    search_info_box=gr.JSON(label = 'Search Info', show_label = True)
 
-    search_results_box=gr.JSON(label='Search Results', show_label=True)
+    search_results_box=gr.JSON(label = 'Search Results', show_label = True)
 
     # Dark theme by default:
     javascript_code = '''
@@ -207,10 +213,10 @@ def main():
 
     # Initialize Gradio interface:
     gradio_interface = gr.Blocks(
-        theme=gr.themes.Glass(),
-        js=javascript_code,
-        css=css_code,
-        title='Reteti'
+        theme = gr.themes.Glass(),
+        js    = javascript_code,
+        css   = css_code,
+        title = 'Reteti'
     )
 
     with gradio_interface:
@@ -223,7 +229,7 @@ def main():
             )
 
         with gr.Row():
-            with gr.Column(scale=30):
+            with gr.Column(scale = 30):
                 gr.Markdown(
                     '''
                     **License:** Apache License 2.0.  
@@ -231,7 +237,7 @@ def main():
                     '''
                 )
 
-            with gr.Column(scale=40):
+            with gr.Column(scale = 40):
                 gr.Markdown(
                     '''
                     **Dataset:** [Common Crawl News](https://commoncrawl.org/blog/news-dataset-available) - 2021  
@@ -239,7 +245,7 @@ def main():
                     '''
                 )
 
-            with gr.Column(scale=30):
+            with gr.Column(scale = 30):
                 gr.Markdown(
                     '''
                     **Tokenizer:** BGE-M3  
@@ -251,10 +257,10 @@ def main():
             search_request_box.render()
 
         with gr.Row():
-            with gr.Column(scale=1):
+            with gr.Column(scale = 1):
                 results_number.render()
 
-            with gr.Column(scale=3):
+            with gr.Column(scale = 3):
                 gr.Examples(
                     [
                         'ваксина срещу COVID-19',
@@ -286,16 +292,16 @@ def main():
             search_results_box.render()
 
         gr.on(
-            triggers=[
+            triggers = [
                 search_request_box.submit,
                 search_button.click
             ],
-            fn=text_searcher,
-            inputs=[
+            fn      = text_searcher,
+            inputs  = [
                 search_request_box,
                 results_number
             ],
-            outputs=[
+            outputs = [
                 search_info_box,
                 search_results_box
             ],
@@ -325,8 +331,8 @@ def main():
     try:
         uvicorn.run(
             fastapi_app,
-            host='0.0.0.0',
-            port=7860
+            host = '0.0.0.0',
+            port = 7860
         )
     except (KeyboardInterrupt, SystemExit):
         print('\n')
