@@ -166,7 +166,7 @@ def main():
 
     results_number = gr.Dropdown(
         [10, 20, 50],
-        label = "Number of Search Results",
+        label = 'Maximal Number of Search Results',
         value = 10
     )
 
@@ -224,7 +224,7 @@ def main():
             gr.Markdown(
                 '''
                 # Reteti
-                ## Lexical Search based on Object Storage
+                ## Lexical Search on Object Storage
                 '''
             )
 
@@ -263,15 +263,23 @@ def main():
             with gr.Column(scale = 3):
                 gr.Examples(
                     [
+                        'COVID-19 pandemic',
+                        'vaccination campaign',
+                        'vaccine nationalism',
+                        'remote work',
+                        'virtual learning',
+                        'digital economy',
+                        'international trade',
+                        'pharmaceutical industry',
                         'ваксина срещу COVID-19',
                         'ваксина срещу коронавирус',
-                        'пандемия',
                         'околна среда'
                     ],
-                    fn=text_searcher,
-                    inputs=search_request_box,
-                    outputs=search_results_box,
-                    cache_examples=False
+                    fn                = text_searcher,
+                    inputs            = search_request_box,
+                    outputs           = search_results_box,
+                    examples_per_page = 11,
+                    cache_examples    = False
                 )
 
         with gr.Row():
