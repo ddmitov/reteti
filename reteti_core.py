@@ -3,6 +3,7 @@
 # Python core modules:
 from   datetime import datetime
 from   datetime import timedelta
+from   multiprocessing      import cpu_count
 from   multiprocessing.pool import ThreadPool
 import os
 from   pathlib  import Path
@@ -269,13 +270,17 @@ def reteti_token_reader(
     dataset_filesystem: fs.S3FileSystem,
     token_path:         str,
     token_occurrences:  int
-) -> pa.Table:
+) -> None | pa.Table:
+    token_arrow_table = None
 
-    token_arrow_table = pq.read_table(
-        token_path,
-        filesystem = dataset_filesystem,
-        filters    = [('occurrences', '>=', token_occurrences)]
-    )
+    try:
+        token_arrow_table = pq.read_table(
+            token_path,
+            filesystem = dataset_filesystem,
+            filters    = [('occurrences', '>=', token_occurrences)]
+        )
+    except FileNotFoundError:
+        pass
 
     return token_arrow_table
 
@@ -287,7 +292,7 @@ def reteti_searcher(
     search_request:     str,
     results_number:     int,
     thread_pool:        object
-) -> pa.Table:
+) -> None | pa.Table:
     # Tokenize user input
     token_list = tokenizer.encode(
         sequence           = search_request,
@@ -312,8 +317,20 @@ def reteti_searcher(
         token_reader_arguments
     )
 
-    token_arrow_tables_list = token_result.get()
-    token_arrow_table = pa.concat_tables(token_arrow_tables_list)
+    token_result_list = token_result.get()
+
+    token_arrow_tables_list = [
+        result for result in token_result_list
+        if result is not None
+    ]
+
+    token_arrow_table = None
+
+    if len(token_arrow_tables_list) < len(token_set):
+        return None
+
+    if len(token_arrow_tables_list) == len(token_set):
+        token_arrow_table = pa.concat_tables(token_arrow_tables_list)
 
     text_id_arrow_table = duckdb.sql(
         f'''

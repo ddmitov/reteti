@@ -94,17 +94,19 @@ def text_searcher(
 
     text_extraction_start = time.time()
 
-    text_result_dataframe = reteti_text_extractor(
-        dataset_filesystem,
-        texts_bucket,
-        text_id_arrow_table,
-        thread_pool
-    )
+    text_result_dataframe = None
 
-    search_result = None
+    if text_id_arrow_table is not None:
+        text_result_dataframe = reteti_text_extractor(
+            dataset_filesystem,
+            texts_bucket,
+            text_id_arrow_table,
+            thread_pool
+        )
+
+    search_result = {}
 
     if text_result_dataframe is None:
-        search_result = {}
         search_result['Message:'] = 'No matching texts were found.'
 
     # The results dataframe is converted to
@@ -112,8 +114,6 @@ def text_searcher(
     if text_result_dataframe is not None:
         search_result_index = range(1, len(text_result_dataframe) + 1)
         search_result_list = text_result_dataframe.to_dict('records')
-
-        search_result = {}
 
         for index, element in zip(search_result_index, search_result_list):
             search_result[str(index)] = element
@@ -123,9 +123,9 @@ def text_searcher(
     total_time = round((token_search_time + text_extraction_time), 3)
 
     search_info = {}
-    search_info['Token search .. in seconds'] = token_search_time
-    search_info['Text extraction in seconds'] = text_extraction_time
-    search_info['Total runtime . in seconds'] = total_time
+    search_info['reteti_searcher() ....... runtime in seconds'] = token_search_time
+    search_info['reteti_text_extractor() . runtime in seconds'] = text_extraction_time
+    search_info['Reteti functions combined runtime in seconds'] = total_time
 
     return search_info, search_result
 
