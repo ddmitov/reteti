@@ -240,7 +240,7 @@ def main():
             with gr.Column(scale = 40):
                 gr.Markdown(
                     '''
-                    **Dataset:** [Common Crawl News](https://commoncrawl.org/blog/news-dataset-available) - 2021  
+                    **Dataset:** [Common Crawl News](https://commoncrawl.org/blog/news-dataset-available) - 2021 - 1 000 000 articles  
                     https://huggingface.co/datasets/CloverSearch/cc-news-mutlilingual  
                     '''
                 )
@@ -304,12 +304,12 @@ def main():
                 search_request_box.submit,
                 search_button.click
             ],
-            fn      = text_searcher,
-            inputs  = [
+            fn       = text_searcher,
+            inputs   = [
                 search_request_box,
                 results_number
             ],
-            outputs = [
+            outputs  = [
                 search_info_box,
                 search_results_box
             ],

@@ -25,6 +25,12 @@ Reteti selects the ID numbers of texts that match the following criteria:
 
 The matching tokens frequency is the number of matching search request tokens found in a document divided by the number of all tokens in the same document. Short documents with high number of matching tokens are at the top of the results list.
 
+## Name
+
+Reteti was one of three [giraffe calfs orphaned during a severe drought around 2018 and saved thanks to the kindness and efforts of a local community in Kenya](https://science.sandiegozoo.org/science-blog/lekiji-fupi-and-reteti).  
+  
+Today we use complex data processing technologies thanks to the knowledge, persistence and efforts of many people of a large global community. Just like the small Reteti, we owe much to this community and should always be thankful to its members for their goodwill and contributions!  
+
 ## [Thanks and Credits](./CREDITS.md)
 
 ## [License](./LICENSE)
