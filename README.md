@@ -39,4 +39,4 @@ This program is licensed under the terms of the Apache License 2.0.
 
 ## Author
 
-[Dimitar D. Mitov](https://www.linkedin.com/in/dimitar-mitov-12388982/), 2024
+[Dimitar D. Mitov](https://www.linkedin.com/in/dimitar-mitov-12388982/), 2024 - 2025
