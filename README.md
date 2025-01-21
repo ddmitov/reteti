@@ -1,7 +1,7 @@
 Reteti
 --------------------------------------------------------------------------------
 
-<img align="left" width="100" height="100" src="assets/fupi_svgrepo_com.png">
+<img align="left" width="100" height="100" src="assets/giraffe_svgrepo_com.png">
   
 Reteti is a work-in-progress lexical search experiment based on LLM tokenizer and partitioned index in object storage.
 
