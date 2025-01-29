@@ -3,6 +3,16 @@
 Amata mea Argeia - gratiam magnam tibi ago!  
 Patientia tua in studiis meis computatoriis auxilium meum maximum!  
 
+Many thanks to Svilen Stanoev who introduced me to the concept of partitioned datasets in object storage some years ago!  
+Thank you, Svilen!  
+
+Many thanks to the contributors of Apache Arrow, DuckDB and Hugging Face Tokenizers!  
+
+Many thanks to the teams of Fly.io, Tigris Data, MinIO, Cloudflare R2 and Hugging Face Datasets!  
+
+Many thanks to the creators of HarperDB, Inc.! Their system introduced me to the "exploded data model".  
+This paradigm influenced heavily the partitioned index of Reteti which is never read in its entirety during search.
+
 ## Python Modules
 
 https://huggingface.co/docs/tokenizers/index  

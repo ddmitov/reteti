@@ -332,6 +332,8 @@ def reteti_searcher(
     if len(token_arrow_tables_list) == len(token_set):
         token_arrow_table = pa.concat_tables(token_arrow_tables_list)
 
+    token_sequence_string = ''.join(map(str, token_list))
+
     text_id_arrow_table = duckdb.sql(
         f'''
             WITH
@@ -359,6 +361,7 @@ def reteti_searcher(
                         text_id,
                         token,
                         single_token_frequency,
+                        position,
                         LEAD(
                             position,
                             {str(len(token_list) - 1)}
@@ -374,34 +377,53 @@ def reteti_searcher(
                             ORDER BY position ASC
                         ) AS distance_to_start
                     FROM positions
+                ),
+
+                borders AS (
+                    SELECT
+                        text_id,
+                        CASE
+                            WHEN {str(len(token_list))} = 1
+                                THEN COUNT(token)
+                            WHEN {str(len(token_list))} > 1
+                                THEN FLOOR(COUNT(token) / 2)
+                        END AS hits,
+                        hits * {str(len(token_list))} AS matching_tokens,
+                        FIRST(single_token_frequency) AS single_token_frequency,
+                        ROUND(
+                            (FIRST(single_token_frequency) * matching_tokens),
+                            5
+                        ) AS matching_tokens_frequency,
+                    FROM distances
+                    WHERE
+                        (
+                            token = {str(token_list[0])}
+                            AND
+                            distance_to_end = {str(len(token_list) - 1)}
+                        )
+                        OR
+                        (
+                            token = {str(token_list[-1])}
+                            AND
+                            distance_to_start = {str(len(token_list) - 1)}
+                        )
+                    GROUP BY text_id
+                    ORDER BY matching_tokens_frequency DESC
                 )
 
             SELECT
-                text_id,
-                CASE
-                    WHEN {str(len(token_list))} = 1
-                        THEN COUNT(token)
-                    WHEN {str(len(token_list))} > 1
-                        THEN FLOOR(COUNT(token) / 2)
-                END AS hits,
-                hits * {str(len(token_list))} AS matching_tokens,
-                FIRST(single_token_frequency) AS single_token_frequency,
-                ROUND(
-                    (FIRST(single_token_frequency) * matching_tokens),
-                    5
-                ) AS matching_tokens_frequency
-            FROM distances
-            WHERE
-                (
-                    token = {str(token_list[0])}
-                    AND distance_to_end = {str(len(token_list) - 1)}
-                )
-                OR (
-                    token = {str(token_list[-1])}
-                    AND distance_to_start  = {str(len(token_list) - 1)}
-                )
-            GROUP BY text_id
-            ORDER BY matching_tokens_frequency DESC
+                FIRST(b.text_id) AS text_id,
+                FIRST(b.hits) AS hits,
+                FIRST(b.matching_tokens) AS matching_tokens,
+                FIRST(b.single_token_frequency) AS single_token_frequency,
+                FIRST(b.matching_tokens_frequency) AS matching_tokens_frequency,
+                STRING_AGG(d.token, '' ORDER BY d.position) AS token_sequence
+            FROM
+                borders AS b
+                INNER JOIN distances AS d ON
+                    d.text_id = b.text_id
+            GROUP BY d.text_id
+            HAVING CONTAINS(token_sequence, '{token_sequence_string}')
             LIMIT {str(results_number)}
         '''
     ).arrow()
