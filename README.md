@@ -13,20 +13,20 @@ Reteti is a work-in-progress lexical search experiment based on LLM tokenizer an
 
 ## Features
 
-☑️ Reteti combines a LLM tokenizer and a partitioned Parquet dataset in object storage.
+- [x] Reteti combines a LLM tokenizer and a partitioned Parquet dataset in object storage.
 
-☑️ The LLM tokenizer converts any text in any supported language to a list of integers. Language-specific stemmers are not used. The token integers with their positions are saved in the dataset under predictable file names.
+- [x] The LLM tokenizer converts any text in any supported language to a list of integers. Language-specific stemmers are not used. The token integers with their positions are saved in the dataset under predictable file names.
 
-☑️ When searching only the data files of the tokens in the search request are contacted. Positional token search is performed using SQL and DuckDB.
+- [x] When searching only the data files of the tokens in the search request are contacted. Positional token search is performed using SQL and DuckDB.
 
-☑️ Storage and compute are decoupled and Reteti can be used in serverless functions.
+- [x] Storage and compute are decoupled and Reteti can be used in serverless functions.
 
-☑️ Text data can be stored anywhere and Reteti index is independent of the text storage location.
+- [x] Text data can be stored anywhere and Reteti index is independent of the text storage location.
 
-☑️ Indexing and searching are completely separate processes.
+- [x] Indexing and searching are completely separate processes.
 
-🪧 A Gradio search demo using one million Bulgarian and English short articles is available at: https://reteti.fly.dev/  
-The demo application with a scale-to-zero capability runs on Fly.io and its object storage is managed by Tigris Data.
+A [Gradio demo](https://reteti.fly.dev/) using one million Bulgarian and English short articles is available on [Fly.io](https://fly.io/).  
+It is scale-to-zero capable and its object storage is managed by [Tigris Data](https://www.tigrisdata.com/).
 
 ## Search Rules
 
