@@ -36,11 +36,11 @@ Reteti selects the ID numbers of texts that match the following criteria:
 
 * **1.** They have token occurences equal or higher than the token occurences of the search request.
 * **2.** They have the full set of unique tokens presented in the search request.
-* **3.** They have one or more sequences of all tokens from the search request positioned next to each other without gaps having first and last token matching the first and last token of the search request.
+* **3.** They have one or more sequences of tokens identical to the sequence of tokens in the search request.
 
 ### Ranking Criterion: Matching Tokens Frequency
 
-The matching tokens frequency is the number of matching search request tokens found in a document divided by the number of all tokens in the same document. Short documents with high number of matching tokens are at the top of the results list.
+The matching tokens frequency is the number of search request tokens found in a document divided by the number of all tokens in the same document. Short documents with high number of matching tokens are at the top of the results list.
 
 ## Name
 

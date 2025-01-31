@@ -336,21 +336,24 @@ def reteti_searcher(
     text_id_arrow_table = duckdb.sql(
         f'''
             WITH
-                single_token_frequencies AS (
-                    SELECT
-                        text_id,
-                        single_token_frequency
-                    FROM token_arrow_table
-                    GROUP BY
-                        text_id,
-                        single_token_frequency
-                ),
-
                 full_token_set AS (
                     SELECT text_id
                     FROM token_arrow_table
                     GROUP BY text_id
                     HAVING COUNT(DISTINCT(token)) = {str(len(token_set))}
+                ),
+
+                single_token_frequencies AS (
+                    SELECT
+                        tat.text_id,
+                        tat.single_token_frequency
+                    FROM
+                        token_arrow_table AS tat
+                        INNER JOIN full_token_set AS fts
+                            ON fts.text_id = tat.text_id
+                    GROUP BY
+                        tat.text_id,
+                        tat.single_token_frequency
                 ),
 
                 positions AS (
@@ -375,12 +378,11 @@ def reteti_searcher(
                         ) OVER (
                             PARTITION BY text_id
                             ORDER BY position ASC
-                        ) - position
-                        AS distance_to_end,
+                        ) - position AS distance_to_end
                     FROM positions
                 ),
 
-                start_positions AS (
+                sequences AS (
                     SELECT
                         text_id,
                         token,
@@ -391,30 +393,37 @@ def reteti_searcher(
                                 AND distance_to_end = {str(len(token_list) - 1)}
                             THEN position
                             ELSE NULL
-                        END AS start_position
+                        END AS start,
+                        CASE
+                            WHEN start IS NULL
+                            THEN
+                                MAX(start) OVER (
+                                    PARTITION BY text_id
+                                    ORDER BY position
+                                    ROWS BETWEEN
+                                        {str(len(token_list) - 1)} PRECEDING
+                                        AND CURRENT ROW
+                                )
+                            ELSE start
+                        END AS nearest_start,
+                        (position - nearest_start) AS distance_to_start,
+                        CASE
+                            WHEN distance_to_start < {str(len(token_list))}
+                            THEN nearest_start
+                            ELSE NULL
+                        END AS sequence_id
                     FROM distances
-                ),
-
-                sequences AS (
-                    SELECT
-                        text_id,
-                        token,
-                        position,
-                        FIRST(start_position) OVER (
-                            PARTITION BY text_id
-                            ORDER BY position
-                            ROWS BETWEEN
-                                {str(len(token_list) - 1)} PRECEDING
-                                AND CURRENT ROW
-                        ) AS sequence_id
-                    FROM start_positions
                 ),
 
                 sequences_aggregated AS (
                     SELECT
                         text_id,
                         sequence_id,
-                        STRING_AGG(token, '' ORDER BY position) AS sequence
+                        CASE
+                            WHEN {str(len(token_list))} > 2
+                            THEN STRING_AGG(token, '' ORDER BY position)
+                            ELSE ''
+                        END AS sequence
                     FROM sequences
                     WHERE sequence_id IS NOT NULL
                     GROUP BY
@@ -422,25 +431,36 @@ def reteti_searcher(
                         sequence_id
                     HAVING
                         COUNT(token) = {str(len(token_list))}
-                        AND FIRST(token ORDER BY position) = {str(token_list[0])}
-                        AND LAST(token ORDER BY position) = {str(token_list[-1])}
-                        AND sequence = '{token_sequence_string}'
+                        AND
+                        FIRST(token ORDER BY position) = {str(token_list[0])}
+                        AND
+                        LAST(token ORDER BY position) = {str(token_list[-1])}
+                        AND
+                        CASE
+                            WHEN {str(len(token_list))} > 2
+                            THEN sequence = '{token_sequence_string}'
+                            ELSE TRUE
+                        END
                 )
 
             SELECT
-                s.text_id,
-                COUNT(s.sequence_id) AS hits,
+                sa.text_id,
+                COUNT(sa.sequence_id) AS hits,
                 hits * {str(len(token_list))} AS matching_tokens,
                 FIRST(stf.single_token_frequency) AS single_token_frequency,
                 ROUND(
-                    (FIRST(stf.single_token_frequency) * matching_tokens),
+                    (
+                        FIRST(stf.single_token_frequency)
+                        *
+                        matching_tokens
+                    ),
                     5
                 ) AS matching_tokens_frequency,
             FROM
-                sequences_aggregated AS s
+                sequences_aggregated AS sa
                 LEFT JOIN single_token_frequencies AS stf
-                    ON stf.text_id = s.text_id
-            GROUP BY s.text_id
+                    ON stf.text_id = sa.text_id
+            GROUP BY sa.text_id
             ORDER BY matching_tokens_frequency DESC
             LIMIT {str(results_number)}
         '''
