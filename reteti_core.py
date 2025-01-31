@@ -331,7 +331,15 @@ def reteti_searcher(
     if len(token_arrow_tables_list) == len(token_set):
         token_arrow_table = pa.concat_tables(token_arrow_tables_list)
 
+    token_list_length = str(len(token_list))
+    token_set_length  = str(len(token_set))
+
+    first_token = str(token_list[0])
+    last_token  = str(token_list[-1])
+
+    distance_to_end       = str(len(token_list) - 1)
     token_sequence_string = ''.join(map(str, token_list))
+    results_number_string = str(results_number)
 
     text_id_arrow_table = duckdb.sql(
         f'''
@@ -340,7 +348,7 @@ def reteti_searcher(
                     SELECT text_id
                     FROM token_arrow_table
                     GROUP BY text_id
-                    HAVING COUNT(DISTINCT(token)) = {str(len(token_set))}
+                    HAVING COUNT(DISTINCT(token)) = {token_set_length}
                 ),
 
                 single_token_frequencies AS (
@@ -374,7 +382,7 @@ def reteti_searcher(
                         position,
                         LEAD(
                             position,
-                            {str(len(token_list) - 1)}
+                            {distance_to_end}
                         ) OVER (
                             PARTITION BY text_id
                             ORDER BY position ASC
@@ -389,8 +397,8 @@ def reteti_searcher(
                         position,
                         CASE
                             WHEN
-                                token = {str(token_list[0])}
-                                AND distance_to_end = {str(len(token_list) - 1)}
+                                token = {first_token}
+                                AND distance_to_end = {distance_to_end}
                             THEN position
                             ELSE NULL
                         END AS start,
@@ -401,14 +409,13 @@ def reteti_searcher(
                                     PARTITION BY text_id
                                     ORDER BY position
                                     ROWS BETWEEN
-                                        {str(len(token_list) - 1)} PRECEDING
+                                        {distance_to_end} PRECEDING
                                         AND CURRENT ROW
                                 )
                             ELSE start
                         END AS nearest_start,
-                        (position - nearest_start) AS distance_to_start,
                         CASE
-                            WHEN distance_to_start < {str(len(token_list))}
+                            WHEN (position - nearest_start) < {token_list_length}
                             THEN nearest_start
                             ELSE NULL
                         END AS sequence_id
@@ -420,7 +427,7 @@ def reteti_searcher(
                         text_id,
                         sequence_id,
                         CASE
-                            WHEN {str(len(token_list))} > 2
+                            WHEN {token_list_length} > 2
                             THEN STRING_AGG(token, '' ORDER BY position)
                             ELSE ''
                         END AS sequence
@@ -430,14 +437,12 @@ def reteti_searcher(
                         text_id,
                         sequence_id
                     HAVING
-                        COUNT(token) = {str(len(token_list))}
-                        AND
-                        FIRST(token ORDER BY position) = {str(token_list[0])}
-                        AND
-                        LAST(token ORDER BY position) = {str(token_list[-1])}
+                        COUNT(token) = {token_list_length}
+                        AND FIRST(token ORDER BY position) = {first_token}
+                        AND LAST(token ORDER BY position)  = {last_token}
                         AND
                         CASE
-                            WHEN {str(len(token_list))} > 2
+                            WHEN {token_list_length} > 2
                             THEN sequence = '{token_sequence_string}'
                             ELSE TRUE
                         END
@@ -446,7 +451,7 @@ def reteti_searcher(
             SELECT
                 sa.text_id,
                 COUNT(sa.sequence_id) AS hits,
-                hits * {str(len(token_list))} AS matching_tokens,
+                hits * {token_list_length} AS matching_tokens,
                 FIRST(stf.single_token_frequency) AS single_token_frequency,
                 ROUND(
                     (
@@ -462,7 +467,7 @@ def reteti_searcher(
                     ON stf.text_id = sa.text_id
             GROUP BY sa.text_id
             ORDER BY matching_tokens_frequency DESC
-            LIMIT {str(results_number)}
+            LIMIT {results_number_string}
         '''
     ).arrow()
 
