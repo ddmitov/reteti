@@ -68,52 +68,28 @@ def reteti_text_writer(
     return text_file_paths
 
 
-def reteti_text_reader(
-    dataset_filesystem: fs.S3FileSystem,
-    text_path:          str
-) -> pa.Table:
+def reteti_text_extractor(
+    dataset_filesystem:  fs.S3FileSystem,
+    bucket:              str,
+    text_id_arrow_table: pa.Table
+) -> pd.DataFrame:
+    text_id_list = text_id_arrow_table.to_pandas()['text_id'].to_list()
+
+    text_paths = []
+
+    for text_id in text_id_list:
+        text_paths.append(f'{bucket}/texts/{text_id}/part-0.arrow')
 
     text_arrow_table = ds.dataset(
-        text_path,
+        text_paths,
         format     = 'arrow',
         filesystem = dataset_filesystem
     ).to_table()
 
-    return text_arrow_table
-
-
-def reteti_text_extractor(
-    dataset_filesystem:  fs.S3FileSystem,
-    bucket:              str,
-    text_id_arrow_table: pa.Table,
-    thread_pool:         object
-) -> pd.DataFrame:
-    text_id_list = text_id_arrow_table.to_pandas()['text_id'].to_list()
-
-    text_reader_arguments = [
-        (
-            dataset_filesystem,
-            f'{bucket}/texts/{text_id}/part-0.arrow'
-        )
-        for text_id in text_id_list
-    ]
-
-    text_result = thread_pool.starmap_async(
-        reteti_text_reader,
-        text_reader_arguments
-    )
-
-    text_arrow_tables_list = text_result.get()
-
-    text_arrow_table = None
-
-    if len(text_arrow_tables_list) > 0:
-        text_arrow_table = pa.concat_tables(text_arrow_tables_list)
-
-    search_result_dataframe = None
+    text_dataframe = None
 
     if text_id_arrow_table is not None and text_arrow_table is not None:
-        search_result_dataframe = duckdb.query(
+        text_dataframe = duckdb.query(
             '''
                 SELECT
                     tiat.matching_tokens_frequency,
@@ -130,4 +106,4 @@ def reteti_text_extractor(
             '''
         ).fetch_arrow_table().to_pandas()
 
-    return search_result_dataframe
+    return text_dataframe

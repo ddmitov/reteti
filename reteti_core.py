@@ -265,71 +265,44 @@ def reteti_index_compactor(
     return True
 
 
-def reteti_token_reader(
-    dataset_filesystem: fs.S3FileSystem,
-    token_path:         str,
-    token_occurrences:  int
-) -> None | pa.Table:
-    token_arrow_table = None
-
-    try:
-        token_arrow_table = pq.read_table(
-            token_path,
-            filesystem = dataset_filesystem,
-            filters    = [('occurrences', '>=', token_occurrences)]
-        )
-    except FileNotFoundError:
-        pass
-
-    return token_arrow_table
-
-
 def reteti_searcher(
     dataset_filesystem: fs.S3FileSystem,
     bucket:             str,
     tokenizer:          object,
     search_request:     str,
-    results_number:     int,
-    thread_pool:        object
+    results_number:     int
 ) -> None | pa.Table:
-    # Tokenize user input
     token_list = tokenizer.encode(
         sequence           = search_request,
         add_special_tokens = False
     ).ids
 
-    # Request tokens are processed here as a set
-    # to avoid reading data of repeated tokens multiple times:
     token_set = set(token_list)
 
-    token_reader_arguments = [
-        (
-            dataset_filesystem,
-            f'{bucket}/tokens/{token}/{token}.parquet',
-            token_list.count(token)
-        )
-        for token in token_set
-    ]
+    token_paths = []
+    filters     = []
 
-    token_result = thread_pool.starmap_async(
-        reteti_token_reader,
-        token_reader_arguments
-    )
+    for token in token_set:
+        token_path = f'{bucket}/tokens/{token}/{token}.parquet'
+        token_paths.append(token_path)
 
-    token_result_list = token_result.get()
+        occurrences = token_list.count(token)
 
-    token_arrow_tables_list = [
-        result for result in token_result_list
-        if result is not None
-    ]
+        token_filter = []
 
-    token_arrow_table = None
+        token_tuple = ('token', '=', token)
+        token_filter.append(token_tuple)
 
-    if len(token_arrow_tables_list) < len(token_set):
-        return None
+        occurences_tuple = ('occurrences', '>=', occurrences)
+        token_filter.append(occurences_tuple)
 
-    if len(token_arrow_tables_list) == len(token_set):
-        token_arrow_table = pa.concat_tables(token_arrow_tables_list)
+        filters.append(token_filter)
+
+    token_arrow_table = pq.ParquetDataset(
+        token_paths,
+        filesystem = dataset_filesystem,
+        filters    = filters
+    ).read()
 
     token_list_length = str(len(token_list))
     token_set_length  = str(len(token_set))

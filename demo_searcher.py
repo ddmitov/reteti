@@ -2,8 +2,6 @@
 
 # Python core modules:
 import datetime
-from   multiprocessing      import cpu_count
-from   multiprocessing.pool import ThreadPool
 import os
 import signal
 import time
@@ -27,9 +25,6 @@ from reteti_text import reteti_text_extractor
 # Global variables:
 tokenizer     = None
 last_activity = None
-
-# Create a global thread pool:
-thread_pool = ThreadPool(cpu_count())
 
 # Load settings from .env file:
 load_dotenv(find_dotenv())
@@ -86,8 +81,7 @@ def text_searcher(
         index_bucket,
         tokenizer,
         search_request,
-        results_number,
-        thread_pool
+        results_number
     )
 
     token_search_time = round((time.time() - token_search_start), 3)
@@ -100,8 +94,7 @@ def text_searcher(
         text_result_dataframe = reteti_text_extractor(
             dataset_filesystem,
             texts_bucket,
-            text_id_arrow_table,
-            thread_pool
+            text_id_arrow_table
         )
 
     search_result = {}
