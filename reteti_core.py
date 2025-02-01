@@ -375,18 +375,26 @@ def reteti_searcher(
                             ON fts.text_id = tat.text_id
                 ),
 
-                distances AS (
+                borders AS (
                     SELECT
                         text_id,
                         token,
                         position,
-                        LEAD(
-                            position,
-                            {distance_to_end}
-                        ) OVER (
-                            PARTITION BY text_id
-                            ORDER BY position ASC
-                        ) - position AS distance_to_end
+                        CASE
+                            WHEN
+                                token = {first_token}
+                                AND {distance_to_end} = (
+                                    LEAD(
+                                        position,
+                                        {distance_to_end}
+                                    ) OVER (
+                                        PARTITION BY text_id
+                                        ORDER BY position ASC
+                                    ) - position
+                                )
+                            THEN position
+                            ELSE NULL
+                        END AS start
                     FROM positions
                 ),
 
@@ -395,31 +403,19 @@ def reteti_searcher(
                         text_id,
                         token,
                         position,
-                        CASE
-                            WHEN
-                                token = {first_token}
-                                AND distance_to_end = {distance_to_end}
-                            THEN position
-                            ELSE NULL
-                        END AS start,
-                        CASE
-                            WHEN start IS NULL
-                            THEN
-                                MAX(start) OVER (
-                                    PARTITION BY text_id
-                                    ORDER BY position
-                                    ROWS BETWEEN
-                                        {distance_to_end} PRECEDING
-                                        AND CURRENT ROW
-                                )
-                            ELSE start
-                        END AS nearest_start,
+                        MAX(start) OVER (
+                            PARTITION BY text_id
+                            ORDER BY position
+                            ROWS BETWEEN
+                                {distance_to_end} PRECEDING
+                                AND CURRENT ROW
+                        ) AS nearest_start,
                         CASE
                             WHEN (position - nearest_start) < {token_list_length}
                             THEN nearest_start
                             ELSE NULL
                         END AS sequence_id
-                    FROM distances
+                    FROM borders
                 ),
 
                 sequences_aggregated AS (
