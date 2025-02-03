@@ -301,8 +301,9 @@ def reteti_searcher(
     token_arrow_table = pq.ParquetDataset(
         token_paths,
         filesystem = dataset_filesystem,
-        filters    = filters
-    ).read()
+        filters    = filters,
+        pre_buffer = True
+    ).read(use_threads = True)
 
     token_list_length = str(len(token_list))
     token_set_length  = str(len(token_set))

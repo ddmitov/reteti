@@ -82,9 +82,12 @@ def reteti_text_extractor(
 
     text_arrow_table = ds.dataset(
         text_paths,
-        format     = 'arrow',
-        filesystem = dataset_filesystem
-    ).to_table()
+        format             = 'arrow',
+        filesystem         = dataset_filesystem
+    ).to_table(
+        use_threads        = True,
+        fragment_readahead = 16
+    )
 
     text_dataframe = None
 
