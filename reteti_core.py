@@ -325,19 +325,6 @@ def reteti_searcher(
                     HAVING COUNT(DISTINCT(token)) = {token_set_length}
                 ),
 
-                single_token_frequencies AS (
-                    SELECT
-                        tat.text_id,
-                        tat.single_token_frequency
-                    FROM
-                        token_arrow_table AS tat
-                        INNER JOIN full_token_set AS fts
-                            ON fts.text_id = tat.text_id
-                    GROUP BY
-                        tat.text_id,
-                        tat.single_token_frequency
-                ),
-
                 positions AS (
                     SELECT
                         tat.text_id,
@@ -416,6 +403,19 @@ def reteti_searcher(
                             THEN sequence = '{token_sequence_string}'
                             ELSE TRUE
                         END
+                ),
+
+                single_token_frequencies AS (
+                    SELECT
+                        tat.text_id,
+                        tat.single_token_frequency
+                    FROM
+                        token_arrow_table AS tat
+                        INNER JOIN sequences_aggregated AS sa
+                            ON sa.text_id = tat.text_id
+                    GROUP BY
+                        tat.text_id,
+                        tat.single_token_frequency
                 )
 
             SELECT
