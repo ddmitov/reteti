@@ -315,7 +315,11 @@ def reteti_searcher(
     token_sequence_string = ''.join(map(str, token_list))
     results_number_string = str(results_number)
 
-    text_id_arrow_table = duckdb.sql(
+    duckdb_connection = duckdb.connect(
+        config = {'allocator_background_threads': True}
+    )
+
+    text_id_arrow_table = duckdb_connection.sql(
         f'''
             WITH
                 full_token_set AS (
@@ -370,13 +374,9 @@ def reteti_searcher(
                             ROWS BETWEEN
                                 {distance_to_end} PRECEDING
                                 AND CURRENT ROW
-                        ) AS nearest_start,
-                        CASE
-                            WHEN (position - nearest_start) < {token_list_length}
-                            THEN nearest_start
-                            ELSE NULL
-                        END AS sequence_id
+                        ) AS sequence_id
                     FROM borders
+                    QUALIFY (position - sequence_id) < {token_list_length}
                 ),
 
                 sequences_aggregated AS (
