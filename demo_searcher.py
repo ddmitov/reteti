@@ -65,6 +65,11 @@ def text_searcher(
     # Tokenize the search request - use the already initialized tokenizer:
     global tokenizer
 
+    token_list = tokenizer.encode(
+        sequence           = search_request,
+        add_special_tokens = False
+    ).ids
+
     # Initialize Parquet dataset filesystem in object storage:
     dataset_filesystem = dataset_filesystem_starter()
 
@@ -72,20 +77,19 @@ def text_searcher(
     index_bucket = os.environ['INDEX_BUCKET']
     texts_bucket = os.environ['TEXTS_BUCKET']
 
-    # Step 1 - token data extraction:
+    # Token search:
     token_search_start = time.time()
 
-    # Search:
     text_id_arrow_table = reteti_searcher(
         dataset_filesystem,
         index_bucket,
-        tokenizer,
-        search_request,
+        token_list,
         results_number
     )
 
     token_search_time = round((time.time() - token_search_start), 3)
 
+    # Text extraction:
     text_extraction_start = time.time()
 
     text_result_dataframe = None

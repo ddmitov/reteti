@@ -15,7 +15,6 @@ import duckdb
 import pandas          as pd
 import pyarrow         as pa
 import pyarrow.dataset as ds
-import pyarrow.feather as ft
 import pyarrow.fs      as fs
 import pyarrow.parquet as pq
 from   tokenizers      import Tokenizer
@@ -68,12 +67,10 @@ def reteti_indexer(
 
         token_list = tokenized_text.ids
 
-        # Count the total number of tokens in a text:
-        tokens_number = len(token_list)
-
         # Create token positions dictionary:
         token_positions = {}
 
+        # Create dictionary of lists with the positions of all tokens:
         for index, token_id in enumerate(token_list):
             if token_id not in token_positions:
                 token_positions[token_id] = []
@@ -268,35 +265,23 @@ def reteti_index_compactor(
 def reteti_searcher(
     dataset_filesystem: fs.S3FileSystem,
     bucket:             str,
-    tokenizer:          object,
-    search_request:     str,
+    token_list:         list,
     results_number:     int
 ) -> None | pa.Table:
-    token_list = tokenizer.encode(
-        sequence           = search_request,
-        add_special_tokens = False
-    ).ids
-
     token_set = set(token_list)
 
     token_paths = []
     filters     = []
 
     for token in token_set:
-        token_path = f'{bucket}/tokens/{token}/{token}.parquet'
-        token_paths.append(token_path)
+        token_paths.append(f'{bucket}/tokens/{token}/{token}.parquet')
 
-        occurrences = token_list.count(token)
-
-        token_filter = []
-
-        token_tuple = ('token', '=', token)
-        token_filter.append(token_tuple)
-
-        occurences_tuple = ('occurrences', '>=', occurrences)
-        token_filter.append(occurences_tuple)
-
-        filters.append(token_filter)
+        filters.append(
+            [
+                ('token', '=', token),
+                ('occurrences', '>=', token_list.count(token))
+            ]
+        )
 
     token_arrow_table = pq.ParquetDataset(
         token_paths,
