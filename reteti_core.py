@@ -276,19 +276,32 @@ def reteti_searcher(
     for token in token_set:
         token_paths.append(f'{bucket}/tokens/{token}/{token}.parquet')
 
-        filters.append(
-            [
-                ('token', '=', token),
-                ('occurrences', '>=', token_list.count(token))
-            ]
-        )
+        occurrences = token_list.count(token)
 
-    token_arrow_table = pq.ParquetDataset(
-        token_paths,
-        filesystem = dataset_filesystem,
-        filters    = filters,
-        pre_buffer = True
-    ).read(use_threads = True)
+        if occurrences > 1:
+            filters.append(
+                [
+                    ('token', '=', token),
+                    ('occurrences', '>=', token_list.count(token))
+                ]
+            )
+
+    token_arrow_table = None
+
+    if len(filters) == 0:
+        token_arrow_table = pq.ParquetDataset(
+            token_paths,
+            filesystem = dataset_filesystem,
+            pre_buffer = True
+        ).read(use_threads = True)
+
+    if len(filters) > 0:
+        token_arrow_table = pq.ParquetDataset(
+            token_paths,
+            filesystem = dataset_filesystem,
+            filters    = filters,
+            pre_buffer = True
+        ).read(use_threads = True)
 
     token_list_length = str(len(token_list))
     token_set_length  = str(len(token_set))
