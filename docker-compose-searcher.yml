@@ -1,25 +1,10 @@
 name: reteti-searcher
 
-# RETETI_UID="$(id -u)" RETETI_GID="$(id -g)" docker compose --file docker-compose-searcher.yml up
+# RETETI_UID="$(id -u)" RETETI_GID="$(id -g)" docker compose --file docker-compose-searcher.yml down
+# RETETI_UID="$(id -u)" RETETI_GID="$(id -g)" docker compose --file docker-compose-searcher.yml build --no-cache
+# RETETI_UID="$(id -u)" RETETI_GID="$(id -g)" docker compose --file docker-compose-searcher.yml up --remove-orphans
 
 services:
-  minio:
-    image: minio/minio
-    user: "${RETETI_UID}:${RETETI_GID}"
-    networks:
-      - savanna
-    hostname: minio
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    env_file: ".env"
-    environment:
-      - MINIO_ROOT_USER=${LOCAL_ACCESS_KEY_ID}
-      - MINIO_ROOT_PASSWORD=${LOCAL_SECRET_ACCESS_KEY}
-    volumes:
-      - ./data/minio:/data
-    command: server /data --address ":9000" --console-address ":9001"
-
   searcher:
     build:
       context: .
@@ -33,9 +18,6 @@ services:
     volumes:
       - .:/app
     command: python /app/demo_searcher.py
-    depends_on:
-      minio:
-        condition: service_started
 
 networks:
   savanna:

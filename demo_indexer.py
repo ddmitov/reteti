@@ -5,8 +5,8 @@ from   datetime import datetime
 from   datetime import timedelta
 import logging
 import os
-import time
-from   typing  import List
+from   time     import time
+from   typing   import List
 
 # Python PIP modules:
 from   dotenv          import find_dotenv
@@ -24,6 +24,7 @@ from reteti_core import reteti_indexer
 from reteti_core import reteti_index_compactor
 
 # Reteti supplementary modules:
+from reteti_file import reteti_file_cleaner
 from reteti_file import reteti_file_uploader
 from reteti_text import reteti_text_writer
 
@@ -44,6 +45,14 @@ def logger_starter() -> logging.Logger:
     logger = logging.getLogger()
 
     return logger
+
+
+def recursive_files_lister(root_dir: str) -> List[str]:
+    return [
+        os.path.join(root, filename)
+        for root, _, filenames in os.walk(root_dir) 
+        for filename in filenames
+    ]
 
 
 def dataset_text_extractor(
@@ -118,10 +127,14 @@ def dataset_text_processor(logger: object) -> list:
             length = ROWS_PER_BATCH
         )
 
-        batch_text_file_list = reteti_text_writer(batch_table, logger)
-        text_file_list.extend(batch_text_file_list)
+        batch_text_file_list = reteti_text_writer(
+            batch_number + 1,
+            bg_batches_total,
+            batch_table,
+            logger
+        )
 
-    del bg_arrow_table
+        text_file_list.extend(batch_text_file_list)
 
     message = 'Processing Common Crawl News English data.'
     print(message, flush=True)
@@ -140,58 +153,48 @@ def dataset_text_processor(logger: object) -> list:
             length = ROWS_PER_BATCH
         )
 
-        batch_text_file_list = reteti_text_writer(batch_table, logger)
-        text_file_list.extend(batch_text_file_list)
+        batch_text_file_list = reteti_text_writer(
+            batch_number + 1,
+            en_batches_total,
+            batch_table,
+            logger
+        )
 
-    del en_arrow_table
+        text_file_list.extend(batch_text_file_list)
 
     return text_file_list
 
 
 def main():
+    processing_start = time()
     logger = logger_starter()
-    total_processing_start = time.time()
 
-    text_filenames = dataset_text_processor(logger)
+    print('Extracting text data ...', flush=True)
+    # text_filenames = dataset_text_processor(logger)
+    text_filenames = recursive_files_lister('/app/data/reteti/texts')
 
     partitioned_text_filenames = reteti_list_splitter(text_filenames, 100)
-
     batch_number = 0
 
     for text_batch in partitioned_text_filenames:
         batch_number += 1
 
-        text_list = ds.dataset(
+        text_arrow_table = ds.dataset(
             text_batch,
             format     = 'arrow',
             filesystem = fs.LocalFileSystem()
-        ).to_table().to_pylist()
+        ).to_table()
+
+        text_arrow_table.drop_columns(['date', 'title'])
 
         reteti_indexer(
             len(partitioned_text_filenames),
             batch_number,
-            text_list,
+            text_arrow_table,
             logger
         )
 
-    reteti_index_compactor(
-        '/app/data/reteti-index',
-        '/app/data/reteti-compact-index',
-        logger
-    )
-
-    # minio_local_client = Minio(
-    #     'minio:9000',
-    #     access_key = os.environ['LOCAL_ACCESS_KEY_ID'],
-    #     secret_key = os.environ['LOCAL_SECRET_ACCESS_KEY'],
-    #     secure     = False
-    # )
-
-    # if not minio_local_client.bucket_exists(os.environ['INDEX_BUCKET']):
-    #     minio_local_client.make_bucket(os.environ['INDEX_BUCKET'])
-
-    # if not minio_local_client.bucket_exists(os.environ['TEXTS_BUCKET']):
-    #     minio_local_client.make_bucket(os.environ['TEXTS_BUCKET'])
+    reteti_index_compactor('/app/data/reteti', logger)
 
     tigris_client = Minio(
         os.environ['TIGRIS_ENDPOINT_S3'],
@@ -200,24 +203,32 @@ def main():
         secure     = True
     )
 
+    # reteti_file_cleaner(
+    #     tigris_client,
+    #     os.environ['INDEX_BUCKET'],
+    #     'tokens'
+    # )
+
     reteti_file_uploader(
         tigris_client,
         os.environ['INDEX_BUCKET'],
-        '/app/data/reteti-compact-index',
+        'tokens',
+        '/app/data/reteti/tokens',
         'parquet'
     )
 
     reteti_file_uploader(
         tigris_client,
         os.environ['TEXTS_BUCKET'],
-        '/app/data/reteti-texts',
+        'texts',
+        '/app/data/reteti/texts',
         'arrow'
     )
 
-    total_processing_time = round((time.time() - total_processing_start), 3)
-    total_processing_time_string = str(timedelta(seconds=total_processing_time))
+    processing_time = round((time() - processing_start), 3)
+    processing_time_string = str(timedelta(seconds=processing_time))
 
-    message = f'All texts processed for {total_processing_time_string}'
+    message = f'All texts processed for {processing_time_string}'
     print(message, flush=True)
     logger.info(message)
 

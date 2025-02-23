@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
 
 # Python core modules:
-from   datetime import datetime
-from   datetime import timedelta
+from   datetime             import datetime
+from   datetime             import timedelta
+from   multiprocessing      import cpu_count
 from   multiprocessing.pool import ThreadPool
 import os
-from   pathlib  import Path
-import re
-from   time     import time
-from   typing   import List
+import shutil
+from   time                 import time
+from   typing               import List
 
 # Python PIP modules:
 import duckdb
-import pandas          as pd
 import pyarrow         as pa
-import pyarrow.dataset as ds
 import pyarrow.fs      as fs
 import pyarrow.parquet as pq
+from   tokenizers      import normalizers
 from   tokenizers      import Tokenizer
 
 
@@ -36,10 +35,10 @@ def reteti_list_splitter(input_list: list, parts_number: int) -> List[list]:
 
 
 def reteti_indexer(
-    batches_total: int,
-    batch_number:  int,
-    batch:         List[dict],
-    logger:        object
+    batches_total:    int,
+    batch_number:     int,
+    text_arrow_table: pa.Table,
+    logger:           object
 ) -> True:
     token_paths = []
 
@@ -48,57 +47,67 @@ def reteti_indexer(
         token_paths.append(written_file.path)
 
 
-    # Initialize tokenizer:
-    tokenizer = Tokenizer.from_file('/tokenizer/tokenizer.json')
-
     # Start measuring time:
     processing_start = time()
 
     # List of dictionaries:
     token_table_list = []
 
-    # Iterate over all texts in a batch:
-    for text in batch:
-        # Tokenize:
-        tokenized_text = tokenizer.encode(
-            sequence           = str(text['text']),
-            add_special_tokens = False
-        )
+    # Extract 'text_id' and 'text' Arrow table columns as lists:
+    text_id_list = text_arrow_table.column('text_id').to_pylist()
+    text_list    = text_arrow_table.column('text').to_pylist()
 
-        token_list = tokenized_text.ids
+    # Tokenize all texts in the batch:
+    normalizer = normalizers.Sequence(
+        [
+            normalizers.NFD(),          # Decompose Unicode characters
+            normalizers.StripAccents(), # Remove accents after decomposition
+            normalizers.Lowercase()     # Convert to lowercase
+        ]
+    )
 
-        # Create token positions dictionary:
+    tokenizer = Tokenizer.from_file('/tokenizer/tokenizer.json')
+    tokenizer.normalizer = normalizer
+
+    token_batch = tokenizer.encode_batch_fast(
+        text_list,
+        add_special_tokens = False
+    )
+
+    # Combine tokens data for every text:
+    for text_id, token_element in zip(text_id_list, token_batch):
+        token_list = token_element.ids
+
+        # Dictionary of lists:
         token_positions = {}
 
-        # Create dictionary of lists with the positions of all tokens:
         for index, token_id in enumerate(token_list):
             if token_id not in token_positions:
                 token_positions[token_id] = []
 
             token_positions[token_id].append(index)
 
-        # Create token occurences dictionary:
+        # Dictionary of integers:
         token_occurences = {
             token_id: token_list.count(token_id)
             for token_id in set(token_list)
         }
 
         for token_id, token_occurrences in token_occurences.items():
-            # Calculate a single token frequency per text:
-            single_token_frequency = round((1 / len(token_list)), 5)
+            total_text_tokens = len(token_list)
 
             token_item = {}
 
-            token_item['token']                  = int(token_id)
-            token_item['text_id']                = int(text['text_id'])
-            token_item['occurrences']            = int(token_occurrences)
-            token_item['positions']              = token_positions[token_id]
-            token_item['single_token_frequency'] = single_token_frequency
+            token_item['token']             = int(token_id)
+            token_item['text_id']           = int(text_id)
+            token_item['occurrences']       = int(token_occurrences)
+            token_item['positions']         = token_positions[token_id]
+            token_item['total_text_tokens'] = int(total_text_tokens)
 
             token_table_list.append(token_item)
 
     # Add data to the tokens dataset:
-    tokens_dataframe = pd.DataFrame(token_table_list)
+    token_arrow_table = pa.Table.from_pylist(token_table_list)
 
     token_arrow_table = duckdb.sql(
         '''
@@ -108,8 +117,8 @@ def reteti_indexer(
                 text_id,
                 occurrences,
                 positions,
-                single_token_frequency
-            FROM tokens_dataframe
+                total_text_tokens
+            FROM token_arrow_table
             ORDER BY partition ASC
         '''
     ).arrow()
@@ -126,7 +135,7 @@ def reteti_indexer(
     pq.write_to_dataset(
         token_arrow_table,
         filesystem             = fs.LocalFileSystem(),
-        root_path              = '/app/data/reteti-index/tokens',
+        root_path              = '/app/data/reteti/tokens',
         partitioning           = ['partition'],
         basename_template      = 'part-{{i}}--{}.parquet'.format(diff_string),
         existing_data_behavior = 'overwrite_or_ignore',
@@ -135,22 +144,28 @@ def reteti_indexer(
     )
 
     # Add data to the metadata dataset:
-    token_path_dataframe = pd.DataFrame(token_paths, columns=['path'])
+    path_array   = pa.array(token_paths)
+    column_names = ['path']
 
-    token_arrow_table = duckdb.sql(
+    token_path_arrow_table = pa.Table.from_arrays(
+        [path_array],
+        names = column_names
+    )
+
+    token_path_arrow_table = duckdb.sql(
         '''
             SELECT
                 path,
                 REGEXP_EXTRACT(path, '\\d{1,10}') AS token,
                 NOW() AS datetime
-            FROM token_path_dataframe
+            FROM token_path_arrow_table
         '''
     ).arrow()
 
     pq.write_to_dataset(
-        token_arrow_table,
+        token_path_arrow_table,
         filesystem             = fs.LocalFileSystem(),
-        root_path              = '/app/data/reteti-index/metadata/paths',
+        root_path              = '/app/data/reteti/metadata/paths',
         basename_template      = 'part-{{i}}--{}.parquet'.format(diff_string),
         existing_data_behavior = 'overwrite_or_ignore'
     )
@@ -171,33 +186,38 @@ def reteti_indexer(
 
 
 def reteti_index_compactor_worker(
-    index_directory:         str,
-    compact_index_directory: str,
-    token_list:              list,
-    batch_number:            int,
-    logger:                  object
+    index_directory: str,
+    token_list:      list,
+    batch_number:    int,
+    logger:          object
 ) -> True:
     token_number = 0
 
     for token in token_list:
         token_number += 1
 
+        token_directory = f'{index_directory}/tokens/{token}'
+
         token_arrow_table = pq.ParquetDataset(
-            f'{index_directory}/tokens/{token}/',
+            f'{token_directory}/',
             filesystem = fs.LocalFileSystem()
         ).read()
 
-        Path(f'{compact_index_directory}/tokens/{token}',).mkdir(
-            parents  = True,
-            exist_ok = True
-        )
+        token_files = []
+
+        with os.scandir(token_directory) as filesystem_objects:
+            for filesystem_object in filesystem_objects:
+                if filesystem_object.is_file():
+                    token_files.append(filesystem_object.path)
 
         pq.write_table(
             token_arrow_table,
-            f'{compact_index_directory}/tokens/{token}/{token}.parquet',
-            filesystem  = fs.LocalFileSystem(),
-            compression = 'NONE'
+            f'{token_directory}/{token}.parquet',
+            filesystem  = fs.LocalFileSystem()
         )
+
+        for token_file in token_files:
+            os.remove(token_file)
 
         message = (
             f'Batch {str(batch_number)} - ' +
@@ -212,12 +232,20 @@ def reteti_index_compactor_worker(
 
 
 def reteti_index_compactor(
-    index_directory:         str,
-    compact_index_directory: str,
-    logger:                  object
+    index_directory: str,
+    logger:          object
 ) -> True:
+    metadata_directory = f'{index_directory}/metadata/paths'
+
+    metadata_files = []
+
+    with os.scandir(metadata_directory) as filesystem_objects:
+        for filesystem_object in filesystem_objects:
+            if filesystem_object.is_file():
+                metadata_files.append(filesystem_object.path)
+
     path_arrow_table = pq.ParquetDataset(
-        f'{index_directory}/metadata/paths/',
+        f'{metadata_directory}/',
         filesystem = fs.LocalFileSystem()
     ).read()
 
@@ -229,19 +257,13 @@ def reteti_index_compactor(
         '''
     ).fetch_arrow_table().to_pandas()['token']
 
-    Path(f'{compact_index_directory}/tokens').mkdir(
-        parents  = True,
-        exist_ok = True
-    )
+    token_batch_list = reteti_list_splitter(unique_token_list, 8)
 
-    token_batch_list = reteti_list_splitter(unique_token_list, 4)
-
-    thread_pool = ThreadPool(4)
+    thread_pool = ThreadPool(cpu_count())
 
     index_compactor_worker_arguments = [
         (
             index_directory,
-            compact_index_directory,
             token_batch,
             batch_number,
             logger
@@ -252,12 +274,17 @@ def reteti_index_compactor(
         )
     ]
 
-    token_result = thread_pool.starmap_async(
+    compaction_result = thread_pool.starmap_async(
         reteti_index_compactor_worker,
         index_compactor_worker_arguments
     )
 
-    token_result_list = token_result.get()
+    compaction_result.get()
+
+    for metadata_file in metadata_files:
+        os.remove(metadata_file)
+
+    shutil.rmtree(f'{index_directory}/metadata')
 
     return True
 
@@ -289,19 +316,27 @@ def reteti_searcher(
     token_arrow_table = None
 
     if len(filters) == 0:
-        token_arrow_table = pq.ParquetDataset(
-            token_paths,
-            filesystem = dataset_filesystem,
-            pre_buffer = True
-        ).read(use_threads = True)
+        try:
+            token_arrow_table = pq.ParquetDataset(
+                token_paths,
+                filesystem = dataset_filesystem,
+                pre_buffer = True
+            ).read(use_threads = True)
+        except FileNotFoundError as error:
+            print(error, flush=True)
+            pass
 
     if len(filters) > 0:
-        token_arrow_table = pq.ParquetDataset(
-            token_paths,
-            filesystem = dataset_filesystem,
-            filters    = filters,
-            pre_buffer = True
-        ).read(use_threads = True)
+        try:
+            token_arrow_table = pq.ParquetDataset(
+                token_paths,
+                filesystem = dataset_filesystem,
+                filters    = filters,
+                pre_buffer = True
+            ).read(use_threads = True)
+        except FileNotFoundError as error:
+            print(error, flush=True)
+            pass
 
     token_list_length = str(len(token_list))
     token_set_length  = str(len(token_set))
@@ -309,13 +344,18 @@ def reteti_searcher(
     first_token = str(token_list[0])
     last_token  = str(token_list[-1])
 
-    distance_to_end       = str(len(token_list) - 1)
+    distance_to_border    = str(len(token_list) - 1)
     token_sequence_string = ''.join(map(str, token_list))
     results_number_string = str(results_number)
 
     duckdb_connection = duckdb.connect(
         config = {'allocator_background_threads': True}
     )
+
+    text_id_arrow_table = None
+
+    if token_arrow_table is None:
+        return text_id_arrow_table
 
     text_id_arrow_table = duckdb_connection.sql(
         f'''
@@ -346,10 +386,10 @@ def reteti_searcher(
                         CASE
                             WHEN
                                 token = {first_token}
-                                AND {distance_to_end} = (
+                                AND {distance_to_border} = (
                                     LEAD(
                                         position,
-                                        {distance_to_end}
+                                        {distance_to_border}
                                     ) OVER (
                                         PARTITION BY text_id
                                         ORDER BY position ASC
@@ -370,7 +410,7 @@ def reteti_searcher(
                             PARTITION BY text_id
                             ORDER BY position
                             ROWS BETWEEN
-                                {distance_to_end} PRECEDING
+                                {distance_to_border} PRECEDING
                                 AND CURRENT ROW
                         ) AS sequence_id
                     FROM borders
@@ -403,36 +443,32 @@ def reteti_searcher(
                         END
                 ),
 
-                single_token_frequencies AS (
+                total_tokens AS (
                     SELECT
                         tat.text_id,
-                        tat.single_token_frequency
+                        tat.total_text_tokens
                     FROM
                         token_arrow_table AS tat
                         INNER JOIN sequences_aggregated AS sa
                             ON sa.text_id = tat.text_id
                     GROUP BY
                         tat.text_id,
-                        tat.single_token_frequency
+                        tat.total_text_tokens
                 )
 
             SELECT
                 sa.text_id,
                 COUNT(sa.sequence_id) AS hits,
                 hits * {token_list_length} AS matching_tokens,
-                FIRST(stf.single_token_frequency) AS single_token_frequency,
+                FIRST(tt.total_text_tokens) AS total_text_tokens,
                 ROUND(
-                    (
-                        FIRST(stf.single_token_frequency)
-                        *
-                        matching_tokens
-                    ),
+                    (matching_tokens / FIRST(tt.total_text_tokens)),
                     5
                 ) AS matching_tokens_frequency,
             FROM
                 sequences_aggregated AS sa
-                LEFT JOIN single_token_frequencies AS stf
-                    ON stf.text_id = sa.text_id
+                LEFT JOIN total_tokens tt
+                    ON tt.text_id = sa.text_id
             GROUP BY sa.text_id
             ORDER BY matching_tokens_frequency DESC
             LIMIT {results_number_string}

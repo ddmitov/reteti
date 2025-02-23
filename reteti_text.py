@@ -13,8 +13,10 @@ import pyarrow.fs      as fs
 
 
 def reteti_text_writer(
-    batch_table: pa.Table,
-    logger:      object
+    batch_number:  int,
+    batches_total: int,
+    batch_table:   pa.Table,
+    logger:        object
 ) -> list:
     text_file_paths = []
 
@@ -60,7 +62,10 @@ def reteti_text_writer(
     processing_time        = round((time() - processing_start), 3)
     processing_time_string = str(timedelta(seconds=processing_time))
 
-    message = (f'Text batch written for {processing_time_string}')
+    message = (
+        f'Text batch {str(batch_number)}/{str(batches_total)} ' +
+        f'written for {processing_time_string}'
+    )
 
     print(message, flush=True)
     logger.info(message)
@@ -73,7 +78,7 @@ def reteti_text_extractor(
     bucket:              str,
     text_id_arrow_table: pa.Table
 ) -> pd.DataFrame:
-    text_id_list = text_id_arrow_table.to_pandas()['text_id'].to_list()
+    text_id_list = text_id_arrow_table.column('text_id').to_pylist()
 
     text_paths = []
 
@@ -82,31 +87,28 @@ def reteti_text_extractor(
 
     text_arrow_table = ds.dataset(
         text_paths,
-        format             = 'arrow',
-        filesystem         = dataset_filesystem
+        format     = 'arrow',
+        filesystem = dataset_filesystem
     ).to_table(
         use_threads        = True,
         fragment_readahead = 16
     )
 
-    text_dataframe = None
-
-    if text_id_arrow_table is not None and text_arrow_table is not None:
-        text_dataframe = duckdb.query(
-            '''
-                SELECT
-                    tiat.matching_tokens_frequency,
-                    tiat.single_token_frequency,
-                    tiat.matching_tokens,
-                    tiat.hits,
-                    tat.* EXCLUDE (text),
-                    tat.text
-                FROM
-                    text_arrow_table AS tat
-                    LEFT JOIN text_id_arrow_table AS tiat
-                        ON tiat.text_id = tat.text_id
-                ORDER BY matching_tokens_frequency DESC
-            '''
-        ).fetch_arrow_table().to_pandas()
+    text_dataframe = duckdb.query(
+        '''
+            SELECT
+                tiat.hits,
+                tiat.matching_tokens,
+                tiat.total_text_tokens,
+                tiat.matching_tokens_frequency,
+                tat.* EXCLUDE (text),
+                tat.text
+            FROM
+                text_arrow_table AS tat
+                LEFT JOIN text_id_arrow_table AS tiat
+                    ON tiat.text_id = tat.text_id
+            ORDER BY matching_tokens_frequency DESC
+        '''
+    ).fetch_arrow_table().to_pandas()
 
     return text_dataframe

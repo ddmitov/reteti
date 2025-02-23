@@ -4,8 +4,9 @@
 import datetime
 import os
 import signal
-import time
 import threading
+import time
+from   typing import List
 
 # Python PIP modules:
 from   dotenv     import find_dotenv
@@ -13,6 +14,7 @@ from   dotenv     import load_dotenv
 from   fastapi    import FastAPI
 import pyarrow.fs as     fs
 import gradio     as     gr
+from   tokenizers import normalizers
 from   tokenizers import Tokenizer
 import uvicorn
 
@@ -22,35 +24,12 @@ from reteti_core import reteti_searcher
 # Reteti supplementary module:
 from reteti_text import reteti_text_extractor
 
-# Global variables:
-tokenizer     = None
+# Global variable for scale-to-zero capability
+# after a period of inactivity:
 last_activity = None
 
 # Load settings from .env file:
 load_dotenv(find_dotenv())
-
-
-def dataset_filesystem_starter() -> fs.S3FileSystem:
-    dataset_filesystem = None
-
-    # Object storage settings for Fly.io deployment:
-    if os.environ.get('FLY_APP_NAME') is not None:
-        dataset_filesystem = fs.S3FileSystem(
-            endpoint_override = os.environ['TIGRIS_ENDPOINT_S3'],
-            access_key        = os.environ['TIGRIS_ACCESS_KEY_ID'],
-            secret_key        = os.environ['TIGRIS_SECRET_ACCESS_KEY'],
-            scheme            = 'https'
-        )
-    # Object storage settings for local development:
-    else:
-        dataset_filesystem = fs.S3FileSystem(
-            endpoint_override = os.environ['LOCAL_ENDPOINT_S3'],
-            access_key        = os.environ['LOCAL_ACCESS_KEY_ID'],
-            secret_key        = os.environ['LOCAL_SECRET_ACCESS_KEY'],
-            scheme            = 'http'
-        )
-
-    return dataset_filesystem
 
 
 def text_searcher(
@@ -59,26 +38,50 @@ def text_searcher(
 ) -> tuple[dict, dict]:
     # Update the timestamp of the last activity:
     global last_activity
-
     last_activity = time.time()
 
-    # Tokenize the search request - use the already initialized tokenizer:
+    # Initialize Parquet dataset filesystem:
+    dataset_filesystem = None
+
+    if os.environ.get('FLY_APP_NAME') is not None:
+        dataset_filesystem = fs.S3FileSystem(
+            endpoint_override = os.environ['TIGRIS_ENDPOINT_S3'],
+            access_key        = os.environ['TIGRIS_ACCESS_KEY_ID'],
+            secret_key        = os.environ['TIGRIS_SECRET_ACCESS_KEY'],
+            scheme            = 'https'
+        )
+    else:
+        dataset_filesystem = fs.LocalFileSystem()
+
+    # Set buckets:
+    index_bucket = None
+    texts_bucket = None
+
+    if os.environ.get('FLY_APP_NAME') is not None:
+        index_bucket = os.environ['INDEX_BUCKET']
+        texts_bucket = os.environ['TEXTS_BUCKET']
+    else:
+        index_bucket = '/app/data/reteti'
+        texts_bucket = '/app/data/reteti'
+
+    # Token search:
+    token_search_start = time.time()
+
+    normalizer = normalizers.Sequence(
+        [
+            normalizers.NFD(),          # Decompose Unicode characters
+            normalizers.StripAccents(), # Remove accents after decomposition
+            normalizers.Lowercase()     # Convert to lowercase
+        ]
+    )
+
     global tokenizer
+    tokenizer.normalizer = normalizer
 
     token_list = tokenizer.encode(
         sequence           = search_request,
         add_special_tokens = False
     ).ids
-
-    # Initialize Parquet dataset filesystem in object storage:
-    dataset_filesystem = dataset_filesystem_starter()
-
-    # Object storage buckets:
-    index_bucket = os.environ['INDEX_BUCKET']
-    texts_bucket = os.environ['TEXTS_BUCKET']
-
-    # Token search:
-    token_search_start = time.time()
 
     text_id_arrow_table = reteti_searcher(
         dataset_filesystem,
@@ -94,7 +97,7 @@ def text_searcher(
 
     text_result_dataframe = None
 
-    if text_id_arrow_table is not None:
+    if text_id_arrow_table is not None and text_id_arrow_table.num_rows > 0:
         text_result_dataframe = reteti_text_extractor(
             dataset_filesystem,
             texts_bucket,

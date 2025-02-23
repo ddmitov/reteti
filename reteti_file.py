@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 # Python core modules:
+from multiprocessing      import cpu_count
 from multiprocessing.pool import ThreadPool
 from pathlib              import Path
 
@@ -13,6 +14,7 @@ from reteti_core import reteti_list_splitter
 def reteti_file_uploader_worker(
     client:           Minio,
     bucket_name:      str,
+    prefix:           str,
     directory:        str,
     file_paths_batch: list,
     batch_number:     int
@@ -27,10 +29,9 @@ def reteti_file_uploader_worker(
         try:
             client.fput_object(
                 bucket_name,
-                object_name,
+                prefix + '/' + object_name,
                 file_path,
-                # 100 MB
-                part_size = 100 * 1024 * 1024
+                part_size = 100 * 1024 * 1024 # 100 MB
             )
 
             message = (
@@ -50,19 +51,20 @@ def reteti_file_uploader_worker(
 def reteti_file_uploader(
     client:         Minio,
     bucket_name:    str,
+    prefix:         str,
     directory:      str,
     file_extension: str
 ) -> True:
     file_paths = list(Path(directory).rglob(f'*.{file_extension}'))
-
     file_paths_batch_list = reteti_list_splitter(file_paths, 8)
 
-    thread_pool = ThreadPool(8)
+    thread_pool = ThreadPool(cpu_count())
 
     arrow_uploader_worker_arguments = [
         (
             client,
             bucket_name,
+            prefix,
             directory,
             file_paths_batch,
             batch_number

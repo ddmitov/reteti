@@ -33,7 +33,3 @@ COPY ./demo_searcher.py /home/reteti/demo_searcher.py
 # Start the Gradio demo application by default:
 EXPOSE 7860
 CMD ["python", "/home/reteti/demo_searcher.py"]
-
-
-# docker build -t reteti .
-# docker buildx build -t reteti .
