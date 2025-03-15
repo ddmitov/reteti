@@ -40,6 +40,8 @@ https://stackoverflow.com/questions/2564137/how-to-terminate-a-thread-when-main-
 ## AI
 
 https://claude.ai/  
+https://chat.deepseek.com/  
+https://cloud.sambanova.ai/  
 
 ## Icon
 

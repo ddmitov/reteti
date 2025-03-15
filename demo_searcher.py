@@ -2,6 +2,7 @@
 
 # Python core modules:
 import datetime
+import hashlib
 import os
 import signal
 import threading
@@ -15,10 +16,11 @@ from   fastapi    import FastAPI
 import pyarrow.fs as     fs
 import gradio     as     gr
 from   tokenizers import normalizers
-from   tokenizers import Tokenizer
+from   tokenizers import pre_tokenizers
 import uvicorn
 
 # Reteti core module:
+from reteti_core import reteti_hash_reader
 from reteti_core import reteti_searcher
 
 # Reteti supplementary module:
@@ -30,6 +32,36 @@ last_activity = None
 
 # Load settings from .env file:
 load_dotenv(find_dotenv())
+
+
+def search_request_hasher(search_request: str) -> list:
+    normalizer = normalizers.Sequence(
+        [
+            normalizers.NFD(),          # Decompose Unicode characters
+            normalizers.StripAccents(), # Remove accents after decomposition
+            normalizers.Lowercase()     # Convert to lowercase
+        ]
+    )
+
+    normalized_search_request = normalizer.normalize_str(search_request)
+
+    pre_tokenizer = pre_tokenizers.Sequence(
+        [
+            pre_tokenizers.Whitespace(),
+            pre_tokenizers.Punctuation(behavior='removed'),
+            pre_tokenizers.Digits(individual_digits=False)
+        ]
+    )
+
+    pre_tokenized_search_request = \
+        pre_tokenizer.pre_tokenize_str(normalized_search_request)
+
+    hash_list = [
+        hashlib.blake2b(word_tuple[0].encode(), digest_size=64).hexdigest()
+        for word_tuple in pre_tokenized_search_request
+    ]
+
+    return hash_list
 
 
 def text_searcher(
@@ -64,70 +96,83 @@ def text_searcher(
         index_bucket = '/app/data/reteti'
         texts_bucket = '/app/data/reteti'
 
-    # Token search:
-    token_search_start = time.time()
+    # Hash the search request:
+    request_hashing_start = time.time()
 
-    normalizer = normalizers.Sequence(
-        [
-            normalizers.NFD(),          # Decompose Unicode characters
-            normalizers.StripAccents(), # Remove accents after decomposition
-            normalizers.Lowercase()     # Convert to lowercase
-        ]
-    )
+    hash_list = search_request_hasher(search_request)
 
-    global tokenizer
-    tokenizer.normalizer = normalizer
+    request_hashing_time = round((time.time() - request_hashing_start), 3)
 
-    token_list = tokenizer.encode(
-        sequence           = search_request,
-        add_special_tokens = False
-    ).ids
+    # Read hashed words index data:
+    index_reading_start = time.time()
 
-    text_id_arrow_table = reteti_searcher(
+    hash_table = reteti_hash_reader(
         dataset_filesystem,
         index_bucket,
-        token_list,
+        hash_list
+    )
+
+    index_reading_time = round((time.time() - index_reading_start), 3)
+
+    # Search:
+    search_start = time.time()
+
+    text_id_table = reteti_searcher(
+        hash_table,
+        hash_list,
         results_number
     )
 
-    token_search_time = round((time.time() - token_search_start), 3)
+    search_time = round((time.time() - search_start), 3)
 
-    # Text extraction:
+    # Extract all matching texts:
     text_extraction_start = time.time()
 
-    text_result_dataframe = None
+    search_result_dataframe = None
 
-    if text_id_arrow_table is not None and text_id_arrow_table.num_rows > 0:
-        text_result_dataframe = reteti_text_extractor(
+    if text_id_table is not None and text_id_table.num_rows > 0:
+        search_result_table = reteti_text_extractor(
             dataset_filesystem,
             texts_bucket,
-            text_id_arrow_table
+            text_id_table
         )
+
+        search_result_dataframe = search_result_table.to_pandas() 
 
     search_result = {}
 
-    if text_result_dataframe is None:
+    if search_result_dataframe is None:
         search_result['Message:'] = 'No matching texts were found.'
 
     # The results dataframe is converted to
     # a numbered list of dictionaries with numbers starting from 1:
-    if text_result_dataframe is not None:
-        search_result_index = range(1, len(text_result_dataframe) + 1)
-        search_result_list = text_result_dataframe.to_dict('records')
+    if search_result_dataframe is not None:
+        search_result_index = range(1, len(search_result_dataframe) + 1)
+        search_result_list = search_result_dataframe.to_dict('records')
 
         for index, element in zip(search_result_index, search_result_list):
             search_result[str(index)] = element
 
     text_extraction_time = round((time.time() - text_extraction_start), 3)
 
-    total_time = round((token_search_time + text_extraction_time), 3)
+    total_time = round(
+        (
+            request_hashing_time +
+            index_reading_time +
+            search_time +
+            text_extraction_time
+        ),
+        3
+    )
 
-    search_info = {}
-    search_info['reteti_searcher() ....... runtime in seconds'] = token_search_time
-    search_info['reteti_text_extractor() . runtime in seconds'] = text_extraction_time
-    search_info['Reteti functions combined runtime in seconds'] = total_time
+    info = {}
+    info['search_request_hasher() . runtime in seconds'] = request_hashing_time
+    info['reteti_hash_reader() .... runtime in seconds'] = index_reading_time
+    info['reteti_searcher() ....... runtime in seconds'] = search_time
+    info['reteti_text_extractor() . runtime in seconds'] = text_extraction_time
+    info['Reteti functions combined runtime in seconds'] = total_time
 
-    return search_info, search_result
+    return info, search_result
 
 
 def activity_inspector():
@@ -154,25 +199,21 @@ def main():
     # Matplotlib is a dependency of Gradio:
     os.environ['MPLCONFIGDIR'] = '/app/data/.config/matplotlib'
 
-    # Initialize the tokenizer only once when the application is started:
-    global tokenizer
-    tokenizer = Tokenizer.from_file('/tokenizer/tokenizer.json')
-
     # Disable Gradio telemetry:
     os.environ['GRADIO_ANALYTICS_ENABLED'] = 'False'
 
     # Define Gradio user interface:
-    search_request_box = gr.Textbox(lines = 1, label = 'Search Request')
+    request_box = gr.Textbox(lines=1, label='Search Request')
 
     results_number = gr.Dropdown(
         [10, 20, 50],
-        label = 'Maximal Number of Search Results',
-        value = 10
+        label='Maximal Number of Search Results',
+        value=10
     )
 
-    search_info_box=gr.JSON(label = 'Search Info', show_label = True)
+    info_box = gr.JSON(label='Search Info', show_label=True)
 
-    search_results_box=gr.JSON(label = 'Search Results', show_label = True)
+    results_box = gr.JSON(label='Search Results', show_label=True)
 
     # Dark theme by default:
     javascript_code = '''
@@ -213,10 +254,15 @@ def main():
 
     # Initialize Gradio interface:
     gradio_interface = gr.Blocks(
-        theme = gr.themes.Glass(),
-        js    = javascript_code,
-        css   = css_code,
-        title = 'Reteti'
+        theme=gr.themes.Glass(
+            font=[
+                "Arial",
+                "sans-serif"
+            ]
+        ),
+        js=javascript_code,
+        css=css_code,
+        title='Reteti'
     )
 
     with gradio_interface:
@@ -229,7 +275,7 @@ def main():
             )
 
         with gr.Row():
-            with gr.Column(scale = 30):
+            with gr.Column(scale=30):
                 gr.Markdown(
                     '''
                     **License:** Apache License 2.0.  
@@ -237,7 +283,7 @@ def main():
                     '''
                 )
 
-            with gr.Column(scale = 40):
+            with gr.Column(scale=40):
                 gr.Markdown(
                     '''
                     **Dataset:** [Common Crawl News](https://commoncrawl.org/blog/news-dataset-available) - 2021 - 1 000 000 articles  
@@ -245,22 +291,14 @@ def main():
                     '''
                 )
 
-            with gr.Column(scale = 30):
-                gr.Markdown(
-                    '''
-                    **Tokenizer:** BGE-M3  
-                    https://huggingface.co/Xenova/bge-m3  
-                    '''
-                )
+        with gr.Row():
+            request_box.render()
 
         with gr.Row():
-            search_request_box.render()
-
-        with gr.Row():
-            with gr.Column(scale = 1):
+            with gr.Column(scale=1):
                 results_number.render()
 
-            with gr.Column(scale = 3):
+            with gr.Column(scale=3):
                 gr.Examples(
                     [
                         'COVID-19 pandemic',
@@ -275,11 +313,11 @@ def main():
                         'ваксина срещу коронавирус',
                         'околна среда'
                     ],
-                    fn                = text_searcher,
-                    inputs            = search_request_box,
-                    outputs           = search_results_box,
-                    examples_per_page = 11,
-                    cache_examples    = False
+                    fn=text_searcher,
+                    inputs=request_box,
+                    outputs=results_box,
+                    examples_per_page=11,
+                    cache_examples=False
                 )
 
         with gr.Row():
@@ -287,32 +325,23 @@ def main():
 
             gr.ClearButton(
                 [
-                    search_info_box,
-                    search_request_box,
-                    search_results_box
+                    info_box,
+                    request_box,
+                    results_box
                 ]
             )
 
         with gr.Row():
-            search_info_box.render()
+            info_box.render()
 
         with gr.Row():
-            search_results_box.render()
+            results_box.render()
 
         gr.on(
-            triggers = [
-                search_request_box.submit,
-                search_button.click
-            ],
-            fn       = text_searcher,
-            inputs   = [
-                search_request_box,
-                results_number
-            ],
-            outputs  = [
-                search_info_box,
-                search_results_box
-            ],
+            triggers=[request_box.submit, search_button.click],
+            fn=text_searcher,
+            inputs=[request_box, results_number],
+            outputs=[info_box, results_box],
         )
 
     gradio_interface.show_api = False

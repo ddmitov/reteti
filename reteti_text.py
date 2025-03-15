@@ -6,7 +6,6 @@ from time     import time
 
 # Python PIP modules:
 import duckdb
-import pandas          as pd
 import pyarrow         as pa
 import pyarrow.dataset as ds
 import pyarrow.fs      as fs
@@ -28,7 +27,7 @@ def reteti_text_writer(
     # Start measuring time:
     processing_start = time()
 
-    text_arrow_table = duckdb.sql(
+    text_table = duckdb.sql(
         f'''
             SELECT
                 text_id AS partition,
@@ -42,12 +41,12 @@ def reteti_text_writer(
     text_id_total = duckdb.query(
         '''
             SELECT COUNT(text_id) AS text_id_total
-            FROM text_arrow_table
+            FROM text_table
         '''
-    ).fetch_arrow_table().to_pandas()['text_id_total'].iloc[0]
+    ).arrow().column('text_id_total')[0].as_py()
 
     ds.write_dataset(
-        text_arrow_table,
+        text_table,
         format                 = 'arrow',
         filesystem             = fs.LocalFileSystem(),
         base_dir               = f'/app/data/reteti-texts/texts',
@@ -74,18 +73,18 @@ def reteti_text_writer(
 
 
 def reteti_text_extractor(
-    dataset_filesystem:  fs.S3FileSystem,
-    bucket:              str,
-    text_id_arrow_table: pa.Table
-) -> pd.DataFrame:
-    text_id_list = text_id_arrow_table.column('text_id').to_pylist()
+    dataset_filesystem: fs.S3FileSystem,
+    bucket:             str,
+    text_id_table:      pa.Table
+) -> pa.Table:
+    text_id_list = text_id_table.column('text_id').to_pylist()
 
-    text_paths = []
+    text_paths = [
+        f'{bucket}/texts/{text_id}/part-0.arrow'
+        for text_id in text_id_list
+    ]
 
-    for text_id in text_id_list:
-        text_paths.append(f'{bucket}/texts/{text_id}/part-0.arrow')
-
-    text_arrow_table = ds.dataset(
+    text_table = ds.dataset(
         text_paths,
         format     = 'arrow',
         filesystem = dataset_filesystem
@@ -94,21 +93,21 @@ def reteti_text_extractor(
         fragment_readahead = 16
     )
 
-    text_dataframe = duckdb.query(
+    search_result_table = duckdb.query(
         '''
             SELECT
-                tiat.hits,
-                tiat.matching_tokens,
-                tiat.total_text_tokens,
-                tiat.matching_tokens_frequency,
-                tat.* EXCLUDE (text),
-                tat.text
+                tit.hits,
+                tit.matching_words,
+                tit.total_words,
+                tit.matching_words_frequency,
+                tt.* EXCLUDE (text),
+                tt.text
             FROM
-                text_arrow_table AS tat
-                LEFT JOIN text_id_arrow_table AS tiat
-                    ON tiat.text_id = tat.text_id
-            ORDER BY matching_tokens_frequency DESC
+                text_table AS tt
+                LEFT JOIN text_id_table AS tit
+                    ON tit.text_id = tt.text_id
+            ORDER BY matching_words_frequency DESC
         '''
-    ).fetch_arrow_table().to_pandas()
+    ).arrow()
 
-    return text_dataframe
+    return search_result_table

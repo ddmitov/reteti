@@ -3,7 +3,7 @@ Reteti
 
 <img align="left" width="100" height="100" src="assets/giraffe_svgrepo_com.png">
   
-Reteti is a work-in-progress lexical search experiment based on LLM tokenizer and partitioned index in object storage.
+Reteti is a work-in-progress lexical search experiment based on partitioned index of hashed words in object storage.
 
 ## Design Objectives
 
@@ -13,18 +13,19 @@ Reteti is a work-in-progress lexical search experiment based on LLM tokenizer an
 
 ## Features
 
-- [x] Reteti combines a LLM tokenizer and a partitioned Parquet dataset in object storage.
+- [x] Reteti splits texts to words using a pre-tokenizer from the Tokenizers Python module.
 
-- [x] The LLM tokenizer converts any text in any supported language to a list of integers.  
-      All token integers with their positions are saved in the dataset under predictable file names.  
-      Language-specific stemmers are not used.
+- [x] Reteti is language-agnostic and no language-specific stemmers are used.
 
-- [x] Only the Parquet files of the tokens in the search request are contacted during search.  
-      Positional token search is performed using SQL and DuckDB.
+- [x] All words are hashed and their positions are saved in a partitioned Parquet dataset under predictable file names.
+
+- [x] Only the Parquet files of the hashes in the search request are contacted during search.  
+
+- [x] Search is performed using DuckDB SQL.
 
 - [x] Storage and compute are decoupled and Reteti can be used in serverless functions.
 
-- [x] Text data can be stored anywhere and Reteti index is independent of the text storage location.
+- [x] Reteti texts can be stored anywhere and the index is independent of the text storage location.
 
 - [x] Indexing and searching are completely separate processes.
 
@@ -37,17 +38,16 @@ It is scale-to-zero capable and its object storage is managed by [Tigris Data](h
 
 Reteti selects the ID numbers of texts that match the following criteria:
 
-* **1.** They have token occurences equal to or higher than the token occurences of the search request.
-* **2.** They have the full set of unique tokens presented in the search request.
-* **3.** They have one or more sequences of tokens identical to the sequence of tokens of the search request.
+* **1.** They have the full set of unique word hashes presented in the search request.
+* **2.** They have one or more sequences of word hashes identical to the sequence of word hashes of the search request.
 
-### Ranking Criterion: Matching Tokens Frequency
+### Ranking Criterion: Matching Words Frequency
 
-The matching tokens frequency is the number of search request tokens found in a document divided by the number of all tokens in the same document. Short documents with high number of matching tokens are at the top of the results list.
+The matching word frequency is the number of search request word hashes found in a document divided by the number of all word hashes in the document. Short documents with high number of matching words are at the top of the results list.
 
 ## Name
 
-Reteti was one of three [giraffe calfs orphaned during a severe drought around 2018 and saved thanks to the kindness and efforts of a local community in Kenya](https://science.sandiegozoo.org/science-blog/lekiji-fupi-and-reteti).  
+Reteti was one of the [giraffe calfs orphaned during a severe drought around 2018 and saved thanks to the kindness and efforts of a local community in Kenya](https://science.sandiegozoo.org/science-blog/lekiji-fupi-and-reteti).  
   
 Today we use complex data processing technologies thanks to the knowledge, persistence and efforts of many people of a large global community. Just like the small Reteti, we owe much to this community and should always be thankful to its members for their goodwill and contributions!  
 

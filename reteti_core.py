@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 
 # Python core modules:
-from   datetime             import datetime
 from   datetime             import timedelta
 from   multiprocessing      import cpu_count
 from   multiprocessing.pool import ThreadPool
 import os
-import shutil
 from   time                 import time
 from   typing               import List
 
@@ -16,7 +14,7 @@ import pyarrow         as pa
 import pyarrow.fs      as fs
 import pyarrow.parquet as pq
 from   tokenizers      import normalizers
-from   tokenizers      import Tokenizer
+from   tokenizers      import pre_tokenizers
 
 
 def reteti_list_splitter(input_list: list, parts_number: int) -> List[list]:
@@ -35,29 +33,22 @@ def reteti_list_splitter(input_list: list, parts_number: int) -> List[list]:
 
 
 def reteti_indexer(
-    batches_total:    int,
-    batch_number:     int,
-    text_arrow_table: pa.Table,
-    logger:           object
+    batches_total:     int,
+    batch_number:      int,
+    text_table:        pa.Table,
+    duckdb_connection: object,
+    logger:            object
 ) -> True:
-    token_paths = []
-
-
-    def tokens_file_visitor(written_file):
-        token_paths.append(written_file.path)
-
-
     # Start measuring time:
     processing_start = time()
 
     # List of dictionaries:
-    token_table_list = []
+    words_table_list = []
 
     # Extract 'text_id' and 'text' Arrow table columns as lists:
-    text_id_list = text_arrow_table.column('text_id').to_pylist()
-    text_list    = text_arrow_table.column('text').to_pylist()
+    text_id_list = text_table.column('text_id').to_pylist()
+    text_list    = text_table.column('text').to_pylist()
 
-    # Tokenize all texts in the batch:
     normalizer = normalizers.Sequence(
         [
             normalizers.NFD(),          # Decompose Unicode characters
@@ -66,108 +57,71 @@ def reteti_indexer(
         ]
     )
 
-    tokenizer = Tokenizer.from_file('/tokenizer/tokenizer.json')
-    tokenizer.normalizer = normalizer
+    normalized_texts = [
+        normalizer.normalize_str(text)
+        for text in text_list
+    ]
 
-    token_batch = tokenizer.encode_batch_fast(
-        text_list,
-        add_special_tokens = False
+    pre_tokenizer = pre_tokenizers.Sequence(
+        [
+            pre_tokenizers.Whitespace(),
+            pre_tokenizers.Punctuation(behavior='removed'),
+            pre_tokenizers.Digits(individual_digits=False)
+        ]
     )
 
-    # Combine tokens data for every text:
-    for text_id, token_element in zip(text_id_list, token_batch):
-        token_list = token_element.ids
+    pre_tokenized_texts = [
+        pre_tokenizer.pre_tokenize_str(text)
+        for text in normalized_texts
+    ]
 
+    words_batch = [
+        [
+            word_tuple[0]
+            for word_tuple in pre_tokenized_text
+        ]
+        for pre_tokenized_text in pre_tokenized_texts
+    ]
+
+    # Iterate all texts in a batch:
+    for text_id, words_list in zip(text_id_list, words_batch):
         # Dictionary of lists:
-        token_positions = {}
+        word_positions = {}
 
-        for index, token_id in enumerate(token_list):
-            if token_id not in token_positions:
-                token_positions[token_id] = []
+        for index, word in enumerate(words_list):
+            if word not in word_positions:
+                word_positions[word] = []
 
-            token_positions[token_id].append(index)
+            word_positions[word].append(index)
 
-        # Dictionary of integers:
-        token_occurences = {
-            token_id: token_list.count(token_id)
-            for token_id in set(token_list)
-        }
+        total_words = len(words_list)
 
-        for token_id, token_occurrences in token_occurences.items():
-            total_text_tokens = len(token_list)
+        for word in words_list:
+            word_item = {}
 
-            token_item = {}
+            word_item['word']        = str(word)
+            word_item['text_id']     = str(text_id)
+            word_item['positions']   = word_positions[word]
+            word_item['total_words'] = int(total_words)
 
-            token_item['token']             = int(token_id)
-            token_item['text_id']           = int(text_id)
-            token_item['occurrences']       = int(token_occurrences)
-            token_item['positions']         = token_positions[token_id]
-            token_item['total_text_tokens'] = int(total_text_tokens)
+            words_table_list.append(word_item)
 
-            token_table_list.append(token_item)
+    batch_words_table = pa.Table.from_pylist(words_table_list)
 
-    # Add data to the tokens dataset:
-    token_arrow_table = pa.Table.from_pylist(token_table_list)
-
-    token_arrow_table = duckdb.sql(
+    batch_hash_table = duckdb_connection.sql(
         '''
             SELECT
-                token AS partition,
-                token,
+                CRYPTO_HASH('blake2b-512', word) AS hash,
                 text_id,
-                occurrences,
                 positions,
-                total_text_tokens
-            FROM token_arrow_table
-            ORDER BY partition ASC
+                total_words
+            FROM batch_words_table
+            ORDER BY hash ASC
         '''
     ).arrow()
 
-    unique_partitions_number = duckdb.query(
-        '''
-            SELECT COUNT(DISTINCT partition) AS partitions
-            FROM token_arrow_table
-        '''
-    ).fetch_arrow_table().to_pandas()['partitions'].iloc[0]
-
-    diff_string = datetime.now().strftime('%Y-%m-%d--%H-%M-%S').strip()
-
-    pq.write_to_dataset(
-        token_arrow_table,
-        filesystem             = fs.LocalFileSystem(),
-        root_path              = '/app/data/reteti/tokens',
-        partitioning           = ['partition'],
-        basename_template      = 'part-{{i}}--{}.parquet'.format(diff_string),
-        existing_data_behavior = 'overwrite_or_ignore',
-        max_partitions         = int(unique_partitions_number),
-        file_visitor           = tokens_file_visitor
-    )
-
-    # Add data to the metadata dataset:
-    path_array   = pa.array(token_paths)
-    column_names = ['path']
-
-    token_path_arrow_table = pa.Table.from_arrays(
-        [path_array],
-        names = column_names
-    )
-
-    token_path_arrow_table = duckdb.sql(
-        '''
-            SELECT
-                path,
-                REGEXP_EXTRACT(path, '\\d{1,10}') AS token,
-                NOW() AS datetime
-            FROM token_path_arrow_table
-        '''
-    ).arrow()
-
-    pq.write_to_dataset(
-        token_path_arrow_table,
-        filesystem             = fs.LocalFileSystem(),
-        root_path              = '/app/data/reteti/metadata/paths',
-        basename_template      = 'part-{{i}}--{}.parquet'.format(diff_string),
-        existing_data_behavior = 'overwrite_or_ignore'
+    duckdb_connection.sql(
+        'INSERT INTO hash_table SELECT * FROM batch_hash_table'
     )
 
     # Calculate, display and log processing time:
@@ -175,7 +129,7 @@ def reteti_indexer(
     processing_time_string = str(timedelta(seconds=processing_time))
 
     message = (
-        f'Token batch {str(batch_number)}/{str(batches_total)} ' +
+        f'Words batch {str(batch_number)}/{str(batches_total)} ' +
         f'processed for {processing_time_string}'
     )
 
@@ -185,294 +139,215 @@ def reteti_indexer(
     return True
 
 
-def reteti_index_compactor_worker(
-    index_directory: str,
-    token_list:      list,
-    batch_number:    int,
-    logger:          object
+def reteti_dataset_producer_worker(
+    index_directory:   str,
+    duckdb_connection: object,
+    hash_list:         list,
+    batch_number:      int
 ) -> True:
-    token_number = 0
+    local_duckdb_connection = duckdb_connection.cursor()
 
-    for token in token_list:
-        token_number += 1
+    hash_number = 0
 
-        token_directory = f'{index_directory}/tokens/{token}'
+    for hash_item in hash_list:
+        hash_number += 1
 
-        token_arrow_table = pq.ParquetDataset(
-            f'{token_directory}/',
-            filesystem = fs.LocalFileSystem()
-        ).read()
+        dataset_hash_table = local_duckdb_connection.sql(
+            f'''
+                SELECT *
+                FROM hash_table
+                WHERE hash = '{hash_item}'
+            '''
+        ).arrow()
 
-        token_files = []
-
-        with os.scandir(token_directory) as filesystem_objects:
-            for filesystem_object in filesystem_objects:
-                if filesystem_object.is_file():
-                    token_files.append(filesystem_object.path)
+        os.makedirs(f'{index_directory}/hashes/{hash_item}')
 
         pq.write_table(
-            token_arrow_table,
-            f'{token_directory}/{token}.parquet',
-            filesystem  = fs.LocalFileSystem()
+            dataset_hash_table,
+            f'{index_directory}/hashes/{hash_item}/data.parquet',
+            filesystem = fs.LocalFileSystem()
         )
-
-        for token_file in token_files:
-            os.remove(token_file)
 
         message = (
             f'Batch {str(batch_number)} - ' +
-            f'{str(token_number)}/{str(len(token_list))} - ' +
-            f'compacted data for token {token}'
+            f'{str(hash_number)}/{str(len(hash_list))} - {hash_item}'
         )
 
         print(message, flush=True)
-        logger.info(message)
 
     return True
 
 
-def reteti_index_compactor(
-    index_directory: str,
-    logger:          object
+def reteti_dataset_producer(
+    index_directory:   str,
+    duckdb_connection: object,
+    logger:            object
 ) -> True:
-    metadata_directory = f'{index_directory}/metadata/paths'
-
-    metadata_files = []
-
-    with os.scandir(metadata_directory) as filesystem_objects:
-        for filesystem_object in filesystem_objects:
-            if filesystem_object.is_file():
-                metadata_files.append(filesystem_object.path)
-
-    path_arrow_table = pq.ParquetDataset(
-        f'{metadata_directory}/',
-        filesystem = fs.LocalFileSystem()
-    ).read()
-
-    unique_token_list = duckdb.query(
+    unique_hash_list = duckdb_connection.sql(
         '''
-            SELECT token
-            FROM path_arrow_table
-            GROUP BY token
+            SELECT hash
+            FROM hash_table
+            GROUP BY hash
         '''
-    ).fetch_arrow_table().to_pandas()['token']
+    ).arrow().column('hash').to_pylist()
 
-    token_batch_list = reteti_list_splitter(unique_token_list, 8)
+    message = f'Unique hashes: {str(len(unique_hash_list))}'
+    print(message, flush=True)
+    logger.info(message)
+
+    hash_list = reteti_list_splitter(unique_hash_list, cpu_count())
 
     thread_pool = ThreadPool(cpu_count())
 
-    index_compactor_worker_arguments = [
+    dataset_producer_worker_arguments = [
         (
             index_directory,
-            token_batch,
-            batch_number,
-            logger
+            duckdb_connection,
+            hash_batch,
+            batch_number
         )
-        for token_batch, batch_number in zip(
-            token_batch_list,
-            range(len(token_batch_list))
+        for hash_batch, batch_number in zip(
+            hash_list,
+            range(len(hash_list))
         )
     ]
 
-    compaction_result = thread_pool.starmap_async(
-        reteti_index_compactor_worker,
-        index_compactor_worker_arguments
+    result = thread_pool.starmap_async(
+        reteti_dataset_producer_worker,
+        dataset_producer_worker_arguments
     )
 
-    compaction_result.get()
-
-    for metadata_file in metadata_files:
-        os.remove(metadata_file)
-
-    shutil.rmtree(f'{index_directory}/metadata')
+    result.get()
 
     return True
 
 
-def reteti_searcher(
+def reteti_hash_reader(
     dataset_filesystem: fs.S3FileSystem,
     bucket:             str,
-    token_list:         list,
-    results_number:     int
+    hash_list:          list
 ) -> None | pa.Table:
-    token_set = set(token_list)
+    hash_set = set(hash_list)
 
-    token_paths = []
-    filters     = []
+    hash_paths = [
+        f'{bucket}/hashes/{hash_item}/data.parquet'
+        for hash_item in hash_set
+    ]
 
-    for token in token_set:
-        token_paths.append(f'{bucket}/tokens/{token}/{token}.parquet')
+    hash_table = None
 
-        occurrences = token_list.count(token)
+    try:
+        hash_table = pq.ParquetDataset(
+            hash_paths,
+            filesystem = dataset_filesystem,
+            pre_buffer = True
+        ).read(use_threads = True)
+    except FileNotFoundError:
+        pass
 
-        if occurrences > 1:
-            filters.append(
-                [
-                    ('token', '=', token),
-                    ('occurrences', '>=', token_list.count(token))
-                ]
-            )
+    return hash_table
 
-    token_arrow_table = None
 
-    if len(filters) == 0:
-        try:
-            token_arrow_table = pq.ParquetDataset(
-                token_paths,
-                filesystem = dataset_filesystem,
-                pre_buffer = True
-            ).read(use_threads = True)
-        except FileNotFoundError as error:
-            print(error, flush=True)
-            pass
+def reteti_searcher(
+    hash_table:     pa.Table,
+    hash_list:      list,
+    results_number: int
+) -> None | pa.Table:
+    hash_set = set(hash_list)
 
-    if len(filters) > 0:
-        try:
-            token_arrow_table = pq.ParquetDataset(
-                token_paths,
-                filesystem = dataset_filesystem,
-                filters    = filters,
-                pre_buffer = True
-            ).read(use_threads = True)
-        except FileNotFoundError as error:
-            print(error, flush=True)
-            pass
+    hash_set_length  = str(len(hash_set))
+    hash_list_length = str(len(hash_list))
 
-    token_list_length = str(len(token_list))
-    token_set_length  = str(len(token_set))
+    hash_alias_list = list(range(len(hash_list)))
+    hash_alias_sequence_string = '|'.join(map(str, hash_alias_list))
 
-    first_token = str(token_list[0])
-    last_token  = str(token_list[-1])
+    hash_alias_table = pa.Table.from_arrays(
+        [pa.array(hash_list), pa.array(hash_alias_list)],
+        names=['hash', 'alias']
+    )
 
-    distance_to_border    = str(len(token_list) - 1)
-    token_sequence_string = ''.join(map(str, token_list))
     results_number_string = str(results_number)
 
     duckdb_connection = duckdb.connect(
         config = {'allocator_background_threads': True}
     )
 
-    text_id_arrow_table = None
+    search_query = f'''
+        WITH
+            full_hash_set AS (
+                SELECT
+                    text_id,
+                    FIRST(total_words) AS total_words,
+                FROM hash_table
+                GROUP BY text_id
+                HAVING COUNT(DISTINCT(hash)) = {hash_set_length}
+            ),
 
-    if token_arrow_table is None:
-        return text_id_arrow_table
+            positions AS (
+                SELECT
+                    ht.text_id,
+                    hat.alias AS alias_int,
+                    UNNEST(ht.positions) AS position
+                FROM
+                    hash_table AS ht
+                    INNER JOIN full_hash_set AS fhs
+                        ON fhs.text_id = ht.text_id
+                    LEFT JOIN hash_alias_table AS hat
+                        ON hat.hash = ht.hash
+            ),
 
-    text_id_arrow_table = duckdb_connection.sql(
-        f'''
-            WITH
-                full_token_set AS (
-                    SELECT text_id
-                    FROM token_arrow_table
-                    GROUP BY text_id
-                    HAVING COUNT(DISTINCT(token)) = {token_set_length}
-                ),
+            distances AS (
+                SELECT
+                    text_id,
+                    alias_int,
+                    position,
+                    LEAD(position) OVER (
+                        PARTITION BY text_id
+                        ORDER BY position ASC
+                        ROWS BETWEEN CURRENT ROW and 1 FOLLOWING
+                    ) - position AS lead,
+                FROM positions
+            ),
 
-                positions AS (
-                    SELECT
-                        tat.text_id,
-                        tat.token,
-                        UNNEST(tat.positions) AS position
-                    FROM
-                        token_arrow_table AS tat
-                        INNER JOIN full_token_set AS fts
-                            ON fts.text_id = tat.text_id
-                ),
+            borders AS (
+                SELECT
+                    text_id,
+                    position,
+                    CASE
+                        WHEN lead > 1
+                        THEN CONCAT(CAST(alias_int AS VARCHAR), '|#')
+                        ELSE CAST(alias_int AS VARCHAR)
+                    END AS alias_string
+                FROM distances
+            ),
 
-                borders AS (
-                    SELECT
-                        text_id,
-                        token,
-                        position,
-                        CASE
-                            WHEN
-                                token = {first_token}
-                                AND {distance_to_border} = (
-                                    LEAD(
-                                        position,
-                                        {distance_to_border}
-                                    ) OVER (
-                                        PARTITION BY text_id
-                                        ORDER BY position ASC
-                                    ) - position
-                                )
-                            THEN position
-                            ELSE NULL
-                        END AS start
-                    FROM positions
-                ),
+            texts AS (
+                SELECT
+                    text_id,
+                    STRING_AGG(alias_string, '|' ORDER BY position) AS sequence
+                FROM borders
+                GROUP BY text_id,
+            )
 
-                sequences AS (
-                    SELECT
-                        text_id,
-                        token,
-                        position,
-                        MAX(start) OVER (
-                            PARTITION BY text_id
-                            ORDER BY position
-                            ROWS BETWEEN
-                                {distance_to_border} PRECEDING
-                                AND CURRENT ROW
-                        ) AS sequence_id
-                    FROM borders
-                    QUALIFY (position - sequence_id) < {token_list_length}
-                ),
-
-                sequences_aggregated AS (
-                    SELECT
-                        text_id,
-                        sequence_id,
-                        CASE
-                            WHEN {token_list_length} > 2
-                            THEN STRING_AGG(token, '' ORDER BY position)
-                            ELSE ''
-                        END AS sequence
-                    FROM sequences
-                    WHERE sequence_id IS NOT NULL
-                    GROUP BY
-                        text_id,
-                        sequence_id
-                    HAVING
-                        COUNT(token) = {token_list_length}
-                        AND FIRST(token ORDER BY position) = {first_token}
-                        AND LAST(token ORDER BY position)  = {last_token}
-                        AND
-                        CASE
-                            WHEN {token_list_length} > 2
-                            THEN sequence = '{token_sequence_string}'
-                            ELSE TRUE
-                        END
-                ),
-
-                total_tokens AS (
-                    SELECT
-                        tat.text_id,
-                        tat.total_text_tokens
-                    FROM
-                        token_arrow_table AS tat
-                        INNER JOIN sequences_aggregated AS sa
-                            ON sa.text_id = tat.text_id
-                    GROUP BY
-                        tat.text_id,
-                        tat.total_text_tokens
+        SELECT
+            t.text_id,
+            LEN(
+                REGEXP_EXTRACT_ALL(
+                    FIRST(t.sequence), '{hash_alias_sequence_string}', 0, 'l'
                 )
+            ) AS hits,
+            hits * {hash_list_length} AS matching_words,
+            FIRST(fhs.total_words) AS total_words,
+            ROUND(
+                (matching_words / FIRST(fhs.total_words)), 5
+            ) AS matching_words_frequency
+        FROM
+            texts AS t
+            LEFT JOIN full_hash_set AS fhs
+                ON fhs.text_id = t.text_id
+        GROUP BY t.text_id
+        ORDER BY matching_words_frequency DESC
+        LIMIT {results_number_string}
+    '''
 
-            SELECT
-                sa.text_id,
-                COUNT(sa.sequence_id) AS hits,
-                hits * {token_list_length} AS matching_tokens,
-                FIRST(tt.total_text_tokens) AS total_text_tokens,
-                ROUND(
-                    (matching_tokens / FIRST(tt.total_text_tokens)),
-                    5
-                ) AS matching_tokens_frequency,
-            FROM
-                sequences_aggregated AS sa
-                LEFT JOIN total_tokens tt
-                    ON tt.text_id = sa.text_id
-            GROUP BY sa.text_id
-            ORDER BY matching_tokens_frequency DESC
-            LIMIT {results_number_string}
-        '''
-    ).arrow()
-
-    return text_id_arrow_table
+    return duckdb_connection.sql(search_query).arrow()

@@ -21,7 +21,7 @@ import pyarrow.fs      as     fs
 # Reteti core module:
 from reteti_core import reteti_list_splitter
 from reteti_core import reteti_indexer
-from reteti_core import reteti_index_compactor
+from reteti_core import reteti_dataset_producer
 
 # Reteti supplementary modules:
 from reteti_file import reteti_file_cleaner
@@ -59,7 +59,7 @@ def dataset_text_extractor(
     file_path: str,
     limit:     int
 ) -> pa.Table:
-    arrow_table = duckdb.sql(
+    table = duckdb.sql(
         f'''
             SELECT
                 NEXTVAL('text_id_maker') AS text_id,
@@ -75,9 +75,9 @@ def dataset_text_extractor(
                 AND LENGTH(maintext) <= 2000
                 LIMIT {str(limit)}
         '''
-    ).to_arrow_table()
+    ).to_table()
 
-    return arrow_table
+    return table
 
 
 def dataset_text_processor(logger: object) -> list:
@@ -114,15 +114,15 @@ def dataset_text_processor(logger: object) -> list:
     print(message, flush=True)
     logger.info(message)
 
-    bg_arrow_table = dataset_text_extractor(
+    bg_table = dataset_text_extractor(
         '/app/data/hf/2021/bg.jsonl.gz',
         400000
     )
 
-    bg_batches_total = bg_arrow_table.num_rows // ROWS_PER_BATCH
+    bg_batches_total = bg_table.num_rows // ROWS_PER_BATCH
 
     for batch_number in range(bg_batches_total):
-        batch_table = bg_arrow_table.slice(
+        batch_table = bg_table.slice(
             offset = batch_number * ROWS_PER_BATCH,
             length = ROWS_PER_BATCH
         )
@@ -140,15 +140,15 @@ def dataset_text_processor(logger: object) -> list:
     print(message, flush=True)
     logger.info(message)
 
-    en_arrow_table = dataset_text_extractor(
+    en_table = dataset_text_extractor(
         '/app/data/hf/2021/en01.jsonl.gz',
         600000
     )
 
-    en_batches_total = en_arrow_table.num_rows // ROWS_PER_BATCH
+    en_batches_total = en_table.num_rows // ROWS_PER_BATCH
 
     for batch_number in range(en_batches_total):
-        batch_table = en_arrow_table.slice(
+        batch_table = en_table.slice(
             offset = batch_number * ROWS_PER_BATCH,
             length = ROWS_PER_BATCH
         )
@@ -169,32 +169,55 @@ def main():
     processing_start = time()
     logger = logger_starter()
 
-    print('Extracting text data ...', flush=True)
-    # text_filenames = dataset_text_processor(logger)
-    text_filenames = recursive_files_lister('/app/data/reteti/texts')
+    duckdb_connection = duckdb.connect(
+        '/app/data/reteti/reteti.db',
+        config = {'allocator_background_threads': True}
+    )
 
-    partitioned_text_filenames = reteti_list_splitter(text_filenames, 100)
-    batch_number = 0
+    duckdb_connection.sql('INSTALL crypto FROM community')
+    duckdb_connection.sql('LOAD crypto')
 
-    for text_batch in partitioned_text_filenames:
-        batch_number += 1
+    duckdb_connection.sql(
+        '''
+            CREATE TABLE IF NOT EXISTS hash_table(
+                hash        VARCHAR,
+                text_id     VARCHAR,
+                positions   INTEGER[],
+                total_words INT
+            )
+        '''
+    )
 
-        text_arrow_table = ds.dataset(
-            text_batch,
-            format     = 'arrow',
-            filesystem = fs.LocalFileSystem()
-        ).to_table()
+    # print('Extracting text data ...', flush=True)
 
-        text_arrow_table.drop_columns(['date', 'title'])
+    # # text_filenames = dataset_text_processor(logger)
+    # text_filenames = recursive_files_lister('/app/data/reteti/texts')
 
-        reteti_indexer(
-            len(partitioned_text_filenames),
-            batch_number,
-            text_arrow_table,
-            logger
-        )
+    # print('Indexing ...', flush=True)
 
-    reteti_index_compactor('/app/data/reteti', logger)
+    # partitioned_text_filenames = reteti_list_splitter(text_filenames, 100)
+    # batch_number = 0
+
+    # for text_batch in partitioned_text_filenames:
+    #     batch_number += 1
+
+    #     text_table = ds.dataset(
+    #         text_batch,
+    #         format     = 'arrow',
+    #         filesystem = fs.LocalFileSystem()
+    #     ).to_table()
+
+    #     text_table.drop_columns(['date', 'title'])
+
+    #     reteti_indexer(
+    #         len(partitioned_text_filenames),
+    #         batch_number,
+    #         text_table,
+    #         duckdb_connection,
+    #         logger
+    #     )
+
+    # reteti_dataset_producer('/app/data/reteti', duckdb_connection, logger)
 
     tigris_client = Minio(
         os.environ['TIGRIS_ENDPOINT_S3'],
@@ -203,17 +226,11 @@ def main():
         secure     = True
     )
 
-    # reteti_file_cleaner(
-    #     tigris_client,
-    #     os.environ['INDEX_BUCKET'],
-    #     'tokens'
-    # )
-
     reteti_file_uploader(
         tigris_client,
         os.environ['INDEX_BUCKET'],
-        'tokens',
-        '/app/data/reteti/tokens',
+        'hashes',
+        '/app/data/reteti/hashes',
         'parquet'
     )
 

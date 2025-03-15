@@ -37,7 +37,7 @@ def reteti_file_uploader_worker(
             message = (
                 f'Batch {str(batch_number)} - ' +
                 f'{str(file_number)}/{str(len(file_paths_batch))} - ' +
-                f'{str(file_path)} -> {object_name}'
+                f'{object_name}'
             )
 
             print(message, flush=True)
