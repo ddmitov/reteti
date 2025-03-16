@@ -333,19 +333,24 @@ def reteti_searcher(
             t.text_id,
             LEN(
                 REGEXP_EXTRACT_ALL(
-                    FIRST(t.sequence), '{hash_alias_sequence_string}', 0, 'l'
+                    t.sequence, '{hash_alias_sequence_string}', 0, 'l'
                 )
-            ) AS hits,
+            ) AS regexp_hits,
+            CASE
+                WHEN regexp_hits = 0
+                THEN 1
+                WHEN regexp_hits > 0
+                THEN regexp_hits
+            END AS hits,
             hits * {hash_list_length} AS matching_words,
-            FIRST(fhs.total_words) AS total_words,
+            fhs.total_words AS total_words,
             ROUND(
-                (matching_words / FIRST(fhs.total_words)), 5
+                (matching_words / fhs.total_words), 5
             ) AS matching_words_frequency
         FROM
             texts AS t
             LEFT JOIN full_hash_set AS fhs
                 ON fhs.text_id = t.text_id
-        GROUP BY t.text_id
         ORDER BY matching_words_frequency DESC
         LIMIT {results_number_string}
     '''
