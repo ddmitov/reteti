@@ -2,6 +2,7 @@
 
 # Python core modules:
 from   datetime             import timedelta
+import hashlib
 from   multiprocessing      import cpu_count
 from   multiprocessing.pool import ThreadPool
 import os
@@ -222,7 +223,37 @@ def reteti_dataset_producer(
     return True
 
 
-def reteti_hash_reader(
+def reteti_request_hasher(search_request: str) -> list:
+    normalizer = normalizers.Sequence(
+        [
+            normalizers.NFD(),          # Decompose Unicode characters
+            normalizers.StripAccents(), # Remove accents after decomposition
+            normalizers.Lowercase()     # Convert to lowercase
+        ]
+    )
+
+    normalized_search_request = normalizer.normalize_str(search_request)
+
+    pre_tokenizer = pre_tokenizers.Sequence(
+        [
+            pre_tokenizers.Whitespace(),
+            pre_tokenizers.Punctuation(behavior='removed'),
+            pre_tokenizers.Digits(individual_digits=False)
+        ]
+    )
+
+    pre_tokenized_search_request = \
+        pre_tokenizer.pre_tokenize_str(normalized_search_request)
+
+    hash_list = [
+        hashlib.blake2b(word_tuple[0].encode(), digest_size=64).hexdigest()
+        for word_tuple in pre_tokenized_search_request
+    ]
+
+    return hash_list
+
+
+def reteti_index_reader(
     dataset_filesystem: fs.S3FileSystem,
     bucket:             str,
     hash_list:          list
@@ -253,16 +284,19 @@ def reteti_searcher(
     hash_list:      list,
     results_number: int
 ) -> None | pa.Table:
-    hash_set = set(hash_list)
+    hash_set  = set(hash_list)
+    alias_set = set(range(len(hash_set)))
 
-    hash_set_length  = str(len(hash_set))
-    hash_list_length = str(len(hash_list))
+    hash_alias_dictionary = dict(zip(hash_set, alias_set))
 
-    hash_alias_list = list(range(len(hash_list)))
-    hash_alias_sequence_string = '|'.join(map(str, hash_alias_list))
+    alias_list = [hash_alias_dictionary.get(item) for item in hash_list]
+    alias_sequence_string = '#'.join(map(str, alias_list))
 
     hash_alias_table = pa.Table.from_arrays(
-        [pa.array(hash_list), pa.array(hash_alias_list)],
+        [
+            pa.array(hash_alias_dictionary.keys()),
+            pa.array(hash_alias_dictionary.values())
+        ],
         names=['hash', 'alias']
     )
 
@@ -280,13 +314,13 @@ def reteti_searcher(
                     FIRST(total_words) AS total_words,
                 FROM hash_table
                 GROUP BY text_id
-                HAVING COUNT(DISTINCT(hash)) = {hash_set_length}
+                HAVING COUNT(DISTINCT(hash)) = {str(len(hash_set))}
             ),
 
-            positions AS (
+            positions_by_alias AS (
                 SELECT
-                    ht.text_id,
                     hat.alias AS alias_int,
+                    ht.text_id,
                     UNNEST(ht.positions) AS position
                 FROM
                     hash_table AS ht
@@ -294,6 +328,18 @@ def reteti_searcher(
                         ON fhs.text_id = ht.text_id
                     LEFT JOIN hash_alias_table AS hat
                         ON hat.hash = ht.hash
+            ),
+
+            positions_by_text AS (
+                SELECT
+                    text_id,
+                    position,
+                    alias_int
+                FROM positions_by_alias
+                GROUP BY
+                    text_id,
+                    position,
+                    alias_int
             ),
 
             distances AS (
@@ -306,7 +352,7 @@ def reteti_searcher(
                         ORDER BY position ASC
                         ROWS BETWEEN CURRENT ROW and 1 FOLLOWING
                     ) - position AS lead,
-                FROM positions
+                FROM positions_by_text
             ),
 
             borders AS (
@@ -315,7 +361,7 @@ def reteti_searcher(
                     position,
                     CASE
                         WHEN lead > 1
-                        THEN CONCAT(CAST(alias_int AS VARCHAR), '|#')
+                        THEN CONCAT(CAST(alias_int AS VARCHAR), '##')
                         ELSE CAST(alias_int AS VARCHAR)
                     END AS alias_string
                 FROM distances
@@ -324,33 +370,34 @@ def reteti_searcher(
             texts AS (
                 SELECT
                     text_id,
-                    STRING_AGG(alias_string, '|' ORDER BY position) AS sequence
+                    STRING_AGG(alias_string, '#' ORDER BY position) AS text
                 FROM borders
-                GROUP BY text_id,
+                GROUP BY text_id
+            ),
+
+            sequences AS (
+                SELECT
+                    text_id,
+                    UNNEST(STRING_SPLIT(text, '###')) AS sequence
+                FROM texts
             )
 
         SELECT
-            t.text_id,
-            LEN(
-                REGEXP_EXTRACT_ALL(
-                    t.sequence, '{hash_alias_sequence_string}', 0, 'l'
-                )
-            ) AS regexp_hits,
-            CASE
-                WHEN regexp_hits = 0
-                THEN 1
-                WHEN regexp_hits > 0
-                THEN regexp_hits
-            END AS hits,
-            hits * {hash_list_length} AS matching_words,
-            fhs.total_words AS total_words,
+            -- '{alias_sequence_string}' AS req_sequence,
+            -- STRING_AGG(s.sequence, '-SEP-') AS txt_sequence,
+            s.text_id,
+            COUNT(s.sequence) AS hits,
+            hits * {str(len(hash_list))} AS matching_words,
+            FIRST(fhs.total_words) AS total_words,
             ROUND(
-                (matching_words / fhs.total_words), 5
+                (matching_words / FIRST(fhs.total_words)), 5
             ) AS matching_words_frequency
         FROM
-            texts AS t
+            sequences AS s
             LEFT JOIN full_hash_set AS fhs
-                ON fhs.text_id = t.text_id
+                ON fhs.text_id = s.text_id
+        WHERE sequence = '{alias_sequence_string}'
+        GROUP BY s.text_id
         ORDER BY matching_words_frequency DESC
         LIMIT {results_number_string}
     '''

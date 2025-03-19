@@ -2,7 +2,6 @@
 
 # Python core modules:
 import datetime
-import hashlib
 import os
 import signal
 import threading
@@ -15,16 +14,23 @@ from   dotenv     import load_dotenv
 from   fastapi    import FastAPI
 import pyarrow.fs as     fs
 import gradio     as     gr
-from   tokenizers import normalizers
-from   tokenizers import pre_tokenizers
 import uvicorn
 
 # Reteti core module:
-from reteti_core import reteti_hash_reader
+from reteti_core import reteti_request_hasher
+from reteti_core import reteti_index_reader
 from reteti_core import reteti_searcher
 
 # Reteti supplementary module:
 from reteti_text import reteti_text_extractor
+
+# Start the application for local development at http://0.0.0.0:7860/ using:
+# docker run --rm -it -p 7860:7860 \
+# --user $(id -u):$(id -g) -v $PWD:/app \
+# reteti-demo python /app/demo_searcher.py
+
+# Start the containerized application at http://0.0.0.0:7860/ using:
+# docker run --rm -it -p 7860:7860 reteti-demo
 
 # Global variable for scale-to-zero capability
 # after a period of inactivity:
@@ -32,36 +38,6 @@ last_activity = None
 
 # Load settings from .env file:
 load_dotenv(find_dotenv())
-
-
-def search_request_hasher(search_request: str) -> list:
-    normalizer = normalizers.Sequence(
-        [
-            normalizers.NFD(),          # Decompose Unicode characters
-            normalizers.StripAccents(), # Remove accents after decomposition
-            normalizers.Lowercase()     # Convert to lowercase
-        ]
-    )
-
-    normalized_search_request = normalizer.normalize_str(search_request)
-
-    pre_tokenizer = pre_tokenizers.Sequence(
-        [
-            pre_tokenizers.Whitespace(),
-            pre_tokenizers.Punctuation(behavior='removed'),
-            pre_tokenizers.Digits(individual_digits=False)
-        ]
-    )
-
-    pre_tokenized_search_request = \
-        pre_tokenizer.pre_tokenize_str(normalized_search_request)
-
-    hash_list = [
-        hashlib.blake2b(word_tuple[0].encode(), digest_size=64).hexdigest()
-        for word_tuple in pre_tokenized_search_request
-    ]
-
-    return hash_list
 
 
 def text_searcher(
@@ -99,14 +75,14 @@ def text_searcher(
     # Hash the search request:
     request_hashing_start = time.time()
 
-    hash_list = search_request_hasher(search_request)
+    hash_list = reteti_request_hasher(search_request)
 
     request_hashing_time = round((time.time() - request_hashing_start), 3)
 
-    # Read hashed words index data:
+    # Read the hashed words index data:
     index_reading_start = time.time()
 
-    hash_table = reteti_hash_reader(
+    hash_table = reteti_index_reader(
         dataset_filesystem,
         index_bucket,
         hash_list
@@ -166,8 +142,8 @@ def text_searcher(
     )
 
     info = {}
-    info['search_request_hasher() . runtime in seconds'] = request_hashing_time
-    info['reteti_hash_reader() .... runtime in seconds'] = index_reading_time
+    info['reteti_request_hasher() . runtime in seconds'] = request_hashing_time
+    info['reteti_index_reader() ... runtime in seconds'] = index_reading_time
     info['reteti_searcher() ....... runtime in seconds'] = search_time
     info['reteti_text_extractor() . runtime in seconds'] = text_extraction_time
     info['Reteti functions combined runtime in seconds'] = total_time
@@ -254,12 +230,7 @@ def main():
 
     # Initialize Gradio interface:
     gradio_interface = gr.Blocks(
-        theme=gr.themes.Glass(
-            font=[
-                "Arial",
-                "sans-serif"
-            ]
-        ),
+        theme=gr.themes.Glass(font=["sans-serif"]),
         js=javascript_code,
         css=css_code,
         title='Reteti'
@@ -345,6 +316,7 @@ def main():
         )
 
     gradio_interface.show_api = False
+    gradio_interface.ssr_mode=False
     gradio_interface.queue()
 
     fastapi_app = FastAPI()

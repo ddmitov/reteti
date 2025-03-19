@@ -96,6 +96,8 @@ def reteti_text_extractor(
     search_result_table = duckdb.query(
         '''
             SELECT
+                -- tit.req_sequence,
+                -- tit.txt_sequence,
                 tit.hits,
                 tit.matching_words,
                 tit.total_words,

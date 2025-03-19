@@ -13,21 +13,23 @@ Reteti is a work-in-progress lexical search experiment based on partitioned inde
 
 ## Features
 
-- [x] Reteti splits texts to words using a pre-tokenizer from the Tokenizers Python module.
+- [x] Reteti splits texts to words using normalizers and pre-tokenizers from the Tokenizers Python module.
 
-- [x] Reteti is language-agnostic and no language-specific stemmers are used.
+- [x] Reteti is language-agnostic, multilingual by design and no language-specific stemmers are used.
 
-- [x] All words are hashed and their positions are saved in a partitioned Parquet dataset under predictable file names.
+- [x] All words are hashed and their positions are saved in a partitioned Parquet dataset under prefixes equal to their hash.
 
-- [x] Only the Parquet files of the hashes in the search request are contacted during search.  
+- [x] Only the Parquet files of the hashes in the search request are contacted during search.
+
+- [x] All words are represented by their hashes during search.
 
 - [x] Search is performed using DuckDB SQL.
 
 - [x] Storage and compute are decoupled and Reteti can be used in serverless functions.
 
-- [x] Reteti texts can be stored anywhere and the index is independent of the text storage location.
-
 - [x] Indexing and searching are completely separate processes.
+
+- [x] The locations of the index and the texts are fully independent from one another.
 
 [Gradio demo](https://reteti.fly.dev/) using one million Bulgarian and English short articles is available on [Fly.io](https://fly.io/).  
 It is scale-to-zero capable and its object storage is managed by [Tigris Data](https://www.tigrisdata.com/).
@@ -43,11 +45,11 @@ Reteti selects the ID numbers of texts that match the following criteria:
 
 ### Ranking Criterion: Matching Words Frequency
 
-The matching word frequency is the number of search request word hashes found in a document divided by the number of all word hashes in the document. Short documents with high number of matching words are at the top of the results list.
+The matching word frequency is the number of search request words found in a document divided by the number of all words in the document. Short documents with high number of matching words are at the top of the results list.
 
 ## Name
 
-Reteti was one of the [giraffe calfs orphaned during a severe drought around 2018 and saved thanks to the kindness and efforts of a local community in Kenya](https://science.sandiegozoo.org/science-blog/lekiji-fupi-and-reteti).  
+Reteti was one of the [giraffe calfs orphaned during a severe drought around 2018 in Northern Kenya and saved thanks to the kindness and efforts of a local community](https://science.sandiegozoo.org/science-blog/lekiji-fupi-and-reteti).  
   
 Today we use complex data processing technologies thanks to the knowledge, persistence and efforts of many people of a large global community. Just like the small Reteti, we owe much to this community and should always be thankful to its members for their goodwill and contributions!  
 

@@ -28,6 +28,11 @@ from reteti_file import reteti_file_cleaner
 from reteti_file import reteti_file_uploader
 from reteti_text import reteti_text_writer
 
+# Start the indexing process:
+# docker run --rm -it --user $(id -u):$(id -g) \
+# -v $PWD:/app -v $PWD/data/duckdb:/.duckdb \
+# reteti-demo python /app/demo_indexer.py
+
 load_dotenv(find_dotenv())
 
 
@@ -188,36 +193,36 @@ def main():
         '''
     )
 
-    # print('Extracting text data ...', flush=True)
+    print('Extracting text data ...', flush=True)
 
-    # # text_filenames = dataset_text_processor(logger)
-    # text_filenames = recursive_files_lister('/app/data/reteti/texts')
+    # text_filenames = dataset_text_processor(logger)
+    text_filenames = recursive_files_lister('/app/data/reteti/texts')
 
-    # print('Indexing ...', flush=True)
+    print('Indexing ...', flush=True)
 
-    # partitioned_text_filenames = reteti_list_splitter(text_filenames, 100)
-    # batch_number = 0
+    partitioned_text_filenames = reteti_list_splitter(text_filenames, 100)
+    batch_number = 0
 
-    # for text_batch in partitioned_text_filenames:
-    #     batch_number += 1
+    for text_batch in partitioned_text_filenames:
+        batch_number += 1
 
-    #     text_table = ds.dataset(
-    #         text_batch,
-    #         format     = 'arrow',
-    #         filesystem = fs.LocalFileSystem()
-    #     ).to_table()
+        text_table = ds.dataset(
+            text_batch,
+            format     = 'arrow',
+            filesystem = fs.LocalFileSystem()
+        ).to_table()
 
-    #     text_table.drop_columns(['date', 'title'])
+        text_table.drop_columns(['date', 'title'])
 
-    #     reteti_indexer(
-    #         len(partitioned_text_filenames),
-    #         batch_number,
-    #         text_table,
-    #         duckdb_connection,
-    #         logger
-    #     )
+        reteti_indexer(
+            len(partitioned_text_filenames),
+            batch_number,
+            text_table,
+            duckdb_connection,
+            logger
+        )
 
-    # reteti_dataset_producer('/app/data/reteti', duckdb_connection, logger)
+    reteti_dataset_producer('/app/data/reteti', duckdb_connection, logger)
 
     tigris_client = Minio(
         os.environ['TIGRIS_ENDPOINT_S3'],

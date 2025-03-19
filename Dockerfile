@@ -23,3 +23,6 @@ COPY ./demo_searcher.py /home/reteti/demo_searcher.py
 # Start the demo application by default:
 EXPOSE 7860
 CMD ["python", "/home/reteti/demo_searcher.py"]
+
+# docker build -t reteti-demo .
+# docker buildx build -t reteti-demo .
