@@ -6,7 +6,4 @@
 **/upgit
 
 **/*.md
-**/*.sh
 **/*.toml
-**/*.txt
-**/*.yml

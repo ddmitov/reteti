@@ -15,21 +15,23 @@ Reteti is a work-in-progress lexical search experiment based on partitioned inde
 
 - [x] Reteti splits texts to words using normalizers and pre-tokenizers from the Tokenizers Python module.
 
-- [x] Reteti is language-agnostic, multilingual by design and no language-specific stemmers are used.
+- [x] A word is any sequence of Unicode alphanumeric characters between two whitespaces.
 
-- [x] All words are hashed and their positions are saved in a partitioned Parquet dataset under prefixes equal to their hash.
+- [x] Reteti is multilingual by design, language-agnostic and does not use language-specific stemmers.
 
-- [x] Only the Parquet files of the hashes in the search request are contacted during search.
+- [x] All words are hashed and their positions are saved in a partitioned Parquet dataset under hash prefixes.
 
 - [x] All words are represented by their hashes during search.
+
+- [x] Only the Parquet files of the hashed words in a search request are contacted during search.
 
 - [x] Search is performed using DuckDB SQL.
 
 - [x] Storage and compute are decoupled and Reteti can be used in serverless functions.
 
-- [x] Indexing and searching are completely separate processes.
+- [x] Indexing and searching are separate processes.
 
-- [x] The locations of the index and the texts are fully independent from one another.
+- [x] The locations of the index and the texts are independent from one another.
 
 [Gradio demo](https://reteti.fly.dev/) using one million Bulgarian and English short articles is available on [Fly.io](https://fly.io/).  
 It is scale-to-zero capable and its object storage is managed by [Tigris Data](https://www.tigrisdata.com/).
@@ -41,7 +43,7 @@ It is scale-to-zero capable and its object storage is managed by [Tigris Data](h
 Reteti selects the ID numbers of texts that match the following criteria:
 
 * **1.** They have the full set of unique word hashes presented in the search request.
-* **2.** They have one or more sequences of word hashes identical to the sequence of word hashes of the search request.
+* **2.** They have one or more sequences of word hashes identical to the sequence of word hashes in the search request.
 
 ### Ranking Criterion: Matching Words Frequency
 
