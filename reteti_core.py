@@ -279,7 +279,35 @@ def reteti_index_reader(
     return hash_table
 
 
-def reteti_searcher(
+def reteti_single_word_searcher(
+    hash_table:     pa.Table,
+    results_number: int
+) -> None | pa.Table:
+    results_number_string = str(results_number)
+
+    duckdb_connection = duckdb.connect(
+        config = {'allocator_background_threads': True}
+    )
+
+    search_query = f'''
+        SELECT
+            text_id,
+            LEN(FIRST(positions)) AS hits,
+            hits AS matching_words,
+            FIRST(total_words) AS total_words,
+            ROUND(
+                (matching_words / FIRST(total_words)), 5
+            ) AS matching_words_frequency
+        FROM hash_table
+        GROUP BY text_id
+        ORDER BY matching_words_frequency DESC
+        LIMIT {results_number_string}
+    '''
+
+    return duckdb_connection.sql(search_query).arrow()
+
+
+def reteti_multiple_words_searcher(
     hash_table:     pa.Table,
     hash_list:      list,
     results_number: int

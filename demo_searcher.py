@@ -19,7 +19,8 @@ import uvicorn
 # Reteti core module:
 from reteti_core import reteti_request_hasher
 from reteti_core import reteti_index_reader
-from reteti_core import reteti_searcher
+from reteti_core import reteti_single_word_searcher
+from reteti_core import reteti_multiple_words_searcher
 
 # Reteti supplementary module:
 from reteti_text import reteti_text_extractor
@@ -93,11 +94,21 @@ def text_searcher(
     # Search:
     search_start = time.time()
 
-    text_id_table = reteti_searcher(
-        hash_table,
-        hash_list,
-        results_number
-    )
+    text_id_table = None
+
+    if hash_table is not None:
+        if len(hash_list) == 1:
+            text_id_table = reteti_single_word_searcher(
+                hash_table,
+                results_number
+            )
+
+        if len(hash_list) > 1:
+            text_id_table = reteti_multiple_words_searcher(
+                hash_table,
+                hash_list,
+                results_number
+            )
 
     search_time = round((time.time() - search_start), 3)
 
@@ -106,7 +117,7 @@ def text_searcher(
 
     search_result_dataframe = None
 
-    if text_id_table is not None and text_id_table.num_rows > 0:
+    if text_id_table is not None:
         search_result_table = reteti_text_extractor(
             dataset_filesystem,
             texts_bucket,
@@ -142,11 +153,18 @@ def text_searcher(
     )
 
     info = {}
-    info['reteti_request_hasher() . runtime in seconds'] = request_hashing_time
-    info['reteti_index_reader() ... runtime in seconds'] = index_reading_time
-    info['reteti_searcher() ....... runtime in seconds'] = search_time
-    info['reteti_text_extractor() . runtime in seconds'] = text_extraction_time
-    info['Reteti functions combined runtime in seconds'] = total_time
+
+    info['reteti_request_hasher() ........ runtime in seconds'] = request_hashing_time
+    info['reteti_index_reader() .......... runtime in seconds'] = index_reading_time
+
+    if len(hash_list) == 1:
+        info['reteti_single_word_searcher() .. runtime in seconds'] = search_time
+
+    if len(hash_list) > 1:
+        info['reteti_multiple_words_searcher() runtime in seconds'] = search_time
+
+    info['reteti_text_extractor() ........ runtime in seconds'] = text_extraction_time
+    info['Reteti functions total ......... runtime in seconds'] = total_time
 
     return info, search_result
 
@@ -230,7 +248,10 @@ def main():
 
     # Initialize Gradio interface:
     gradio_interface = gr.Blocks(
-        theme=gr.themes.Glass(font=["sans-serif"]),
+        theme=gr.themes.Glass(
+            font=[gr.themes.GoogleFont('Open Sans')],
+            font_mono=[gr.themes.GoogleFont('Roboto Mono')]
+        ),
         js=javascript_code,
         css=css_code,
         title='Reteti'
@@ -316,7 +337,7 @@ def main():
         )
 
     gradio_interface.show_api = False
-    gradio_interface.ssr_mode=False
+    gradio_interface.ssr_mode = False
     gradio_interface.queue()
 
     fastapi_app = FastAPI()

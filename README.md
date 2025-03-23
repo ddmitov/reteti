@@ -3,7 +3,7 @@ Reteti
 
 <img align="left" width="100" height="100" src="assets/giraffe_svgrepo_com.png">
   
-Reteti is a work-in-progress lexical search experiment based on partitioned index of hashed words in object storage.
+Reteti is a lexical search experiment based on partitioned index of hashed words in object storage.
 
 ## Design Objectives
 
@@ -13,19 +13,21 @@ Reteti is a work-in-progress lexical search experiment based on partitioned inde
 
 ## Features
 
-- [x] Reteti splits texts to words using normalizers and pre-tokenizers from the Tokenizers Python module.
+- [x] Texts are split to words using normalizers and pre-tokenizers from the Tokenizers Python module.
 
-- [x] A word is any sequence of Unicode alphanumeric characters between two whitespaces.
+- [x] A word is any sequence of Unicode lowercase alphanumeric characters between two whitespaces.
 
-- [x] Reteti is multilingual by design, language-agnostic and does not use language-specific stemmers.
+- [x] Reteti is language-agnostic and does not use language-specific stemmers.
 
-- [x] All words are hashed and their positions are saved in a partitioned Parquet dataset under hash prefixes.
-
-- [x] All words are represented by their hashes during search.
+- [x] Words are hashed and their positions are saved in a partitioned Parquet dataset under hash prefixes.
 
 - [x] Only the Parquet files of the hashed words in a search request are contacted during search.
 
 - [x] Search is performed using DuckDB SQL.
+
+- [x] Words are represented by their hashes or integers during search.
+
+- [x] Original texts are not used to produce a list of matching text IDs.
 
 - [x] Storage and compute are decoupled and Reteti can be used in serverless functions.
 
@@ -40,14 +42,14 @@ It is scale-to-zero capable and its object storage is managed by [Tigris Data](h
 
 ### Search Criteria
 
-Reteti selects the ID numbers of texts that match the following criteria:
+Reteti selects the IDs of texts that match the following criteria:
 
 * **1.** They have the full set of unique word hashes presented in the search request.
 * **2.** They have one or more sequences of word hashes identical to the sequence of word hashes in the search request.
 
 ### Ranking Criterion: Matching Words Frequency
 
-The matching word frequency is the number of search request words found in a document divided by the number of all words in the document. Short documents with high number of matching words are at the top of the results list.
+The matching word frequency is the number of search request words found in a document divided by the number of all words in the document. Short documents having high number of matching words are at the top of the search results.
 
 ## Name
 
