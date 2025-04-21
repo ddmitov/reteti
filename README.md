@@ -3,7 +3,7 @@ Reteti
 
 <img align="left" width="100" height="100" src="assets/giraffe_svgrepo_com.png">
   
-Reteti is a lexical search experiment based on partitioned index of hashed words in object storage.
+Reteti is a lexical search experiment using partitioned index of hashed words in object storage.
 
 ## Design Objectives
 
@@ -35,7 +35,7 @@ Reteti is a lexical search experiment based on partitioned index of hashed words
 
 - [x] The locations of the index and the texts are independent from one another.
 
-[Gradio demo](https://reteti.fly.dev/) using one million Bulgarian and English short articles is available on [Fly.io](https://fly.io/).  
+[Gradio demo](https://reteti.fly.dev/) is available on [Fly.io](https://fly.io/).  
 It is scale-to-zero capable and its object storage is managed by [Tigris Data](https://www.tigrisdata.com/).
 
 ## Search Rules

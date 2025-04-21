@@ -3,34 +3,35 @@
 # Python core modules:
 from   datetime import datetime
 from   datetime import timedelta
+import gc
 import logging
 import os
+import shutil
 from   time     import time
 from   typing   import List
 
 # Python PIP modules:
+from   datasets        import load_dataset
 from   dotenv          import find_dotenv
 from   dotenv          import load_dotenv
 import duckdb
-from   huggingface_hub import hf_hub_download
 from   minio           import Minio
 import pyarrow         as     pa
 import pyarrow.dataset as     ds
 import pyarrow.fs      as     fs
 
 # Reteti core module:
-from reteti_core import reteti_list_splitter
 from reteti_core import reteti_indexer
-from reteti_core import reteti_dataset_producer
+from reteti_core import reteti_file_uploader
+from reteti_core import reteti_index_compactor
 
-# Reteti supplementary modules:
-from reteti_file import reteti_file_cleaner
-from reteti_file import reteti_file_uploader
+# Reteti supplementary module:
 from reteti_text import reteti_text_writer
 
 # Start the indexing process:
 # docker run --rm -it --user $(id -u):$(id -g) \
-# -v $PWD:/app -v $PWD/data/duckdb:/.duckdb \
+# -v $PWD:/app \
+# -v $PWD/data:/.cache \
 # reteti-demo python /app/demo_indexer.py
 
 load_dotenv(find_dotenv())
@@ -39,8 +40,10 @@ load_dotenv(find_dotenv())
 def logger_starter() -> logging.Logger:
     start_datetime_string = (datetime.now().strftime('%Y-%m-%d_%H-%M-%S'))
 
+    os.makedirs('/app/data/logs', exist_ok=True)
+
     logging.basicConfig(
-        level    = logging.DEBUG,
+        level    = logging.INFO,
         datefmt  = '%Y-%m-%d %H:%M:%S',
         format   = '%(asctime)s.%(msecs)03d - %(levelname)s - %(message)s',
         filename = f'/app/data/logs/reteti_{start_datetime_string}.log',
@@ -52,178 +55,15 @@ def logger_starter() -> logging.Logger:
     return logger
 
 
-def recursive_files_lister(root_dir: str) -> List[str]:
-    return [
-        os.path.join(root, filename)
-        for root, _, filenames in os.walk(root_dir) 
-        for filename in filenames
-    ]
-
-
-def dataset_text_extractor(
-    file_path: str,
-    limit:     int
-) -> pa.Table:
-    table = duckdb.sql(
-        f'''
-            SELECT
-                NEXTVAL('text_id_maker') AS text_id,
-                date_publish_final AS date,
-                REPLACE(title, '\n', '') AS title,
-                REPLACE(maintext, '\n', ' ') AS text,
-            FROM read_json_auto("{file_path}")
-            WHERE
-                date_publish_final IS NOT NULL
-                AND title IS NOT NULL
-                AND title NOT LIKE '%...'
-                AND maintext NOT LIKE '%...'
-                AND LENGTH(maintext) <= 2000
-                LIMIT {str(limit)}
-        '''
-    ).to_table()
-
-    return table
-
-
-def dataset_text_processor(logger: object) -> list:
-    # Download data from Hugging Face dataset or open a locally cached copy:
-    message = 'Obtaining Common Crawl News Bulgarian data.'
-    print(message, flush=True)
-    logger.info(message)
-
-    hf_hub_download(
-        repo_id   = 'CloverSearch/cc-news-mutlilingual',
-        filename  = '2021/bg.jsonl.gz',
-        local_dir = '/app/data/hf',
-        repo_type = 'dataset'
-    )
-
-    message = 'Obtaining Common Crawl News English data.'
-    print(message, flush=True)
-    logger.info(message)
-
-    hf_hub_download(
-        repo_id   = 'CloverSearch/cc-news-mutlilingual',
-        filename  = '2021/en01.jsonl.gz',
-        local_dir = '/app/data/hf',
-        repo_type = 'dataset'
-    )
-
-    # Set a DuckDB sequence to produce unique text_id numbers:
-    duckdb.sql('CREATE SEQUENCE text_id_maker START 1')
-
-    ROWS_PER_BATCH = 10000
-    text_file_list = []
-
-    message = 'Processing Common Crawl News Bulgarian data.'
-    print(message, flush=True)
-    logger.info(message)
-
-    bg_table = dataset_text_extractor(
-        '/app/data/hf/2021/bg.jsonl.gz',
-        400000
-    )
-
-    bg_batches_total = bg_table.num_rows // ROWS_PER_BATCH
-
-    for batch_number in range(bg_batches_total):
-        batch_table = bg_table.slice(
-            offset = batch_number * ROWS_PER_BATCH,
-            length = ROWS_PER_BATCH
-        )
-
-        batch_text_file_list = reteti_text_writer(
-            batch_number + 1,
-            bg_batches_total,
-            batch_table,
-            logger
-        )
-
-        text_file_list.extend(batch_text_file_list)
-
-    message = 'Processing Common Crawl News English data.'
-    print(message, flush=True)
-    logger.info(message)
-
-    en_table = dataset_text_extractor(
-        '/app/data/hf/2021/en01.jsonl.gz',
-        600000
-    )
-
-    en_batches_total = en_table.num_rows // ROWS_PER_BATCH
-
-    for batch_number in range(en_batches_total):
-        batch_table = en_table.slice(
-            offset = batch_number * ROWS_PER_BATCH,
-            length = ROWS_PER_BATCH
-        )
-
-        batch_text_file_list = reteti_text_writer(
-            batch_number + 1,
-            en_batches_total,
-            batch_table,
-            logger
-        )
-
-        text_file_list.extend(batch_text_file_list)
-
-    return text_file_list
-
-
 def main():
-    processing_start = time()
+    FIRST_TABLE_NUMBER = 1
+    LAST_TABLE_NUMBER  = 60
+    TEXTS_PER_BATCH    = 25000
+
+    script_start = time()
     logger = logger_starter()
 
-    duckdb_connection = duckdb.connect(
-        '/app/data/reteti/reteti.db',
-        config = {'allocator_background_threads': True}
-    )
-
-    duckdb_connection.sql('INSTALL crypto FROM community')
-    duckdb_connection.sql('LOAD crypto')
-
-    duckdb_connection.sql(
-        '''
-            CREATE TABLE IF NOT EXISTS hash_table(
-                hash        VARCHAR,
-                text_id     VARCHAR,
-                positions   INTEGER[],
-                total_words INT
-            )
-        '''
-    )
-
-    print('Extracting text data ...', flush=True)
-
-    # text_filenames = dataset_text_processor(logger)
-    text_filenames = recursive_files_lister('/app/data/reteti/texts')
-
-    print('Indexing ...', flush=True)
-
-    partitioned_text_filenames = reteti_list_splitter(text_filenames, 100)
-    batch_number = 0
-
-    for text_batch in partitioned_text_filenames:
-        batch_number += 1
-
-        text_table = ds.dataset(
-            text_batch,
-            format     = 'arrow',
-            filesystem = fs.LocalFileSystem()
-        ).to_table()
-
-        text_table.drop_columns(['date', 'title'])
-
-        reteti_indexer(
-            len(partitioned_text_filenames),
-            batch_number,
-            text_table,
-            duckdb_connection,
-            logger
-        )
-
-    reteti_dataset_producer('/app/data/reteti', duckdb_connection, logger)
-
+    # Tigris object storage client:
     tigris_client = Minio(
         os.environ['TIGRIS_ENDPOINT_S3'],
         access_key = os.environ['TIGRIS_ACCESS_KEY_ID'],
@@ -231,26 +71,283 @@ def main():
         secure     = True
     )
 
+    # Process the dataset:
+    processing_start = time()
+
+    dataset = load_dataset(
+        path  = 'stanford-oval/ccnews',
+        split = 'train',
+        name  = '2016'
+    )
+
+    dataset = dataset.with_format('arrow')
+
+    processing_time = round((time() - processing_start))
+    processing_time_string = str(timedelta(seconds=processing_time))
+
+    message = f'Dataset processed for {processing_time_string}'
+
+    print(message, flush=True)
+    logger.info(message)
+
+    # Set DuckDB sequence:
+    sequence_start = 1
+
+    if FIRST_TABLE_NUMBER > 1:
+        sequence_start = ((FIRST_TABLE_NUMBER - 1) * TEXTS_PER_BATCH) + 1
+
+    duckdb.sql(f'CREATE SEQUENCE text_id_maker START {str(sequence_start)}')
+
+    # Iterate all text batches:
+    table_number = 0
+    texts_total  = 0
+
+    for raw_table in dataset.iter(batch_size=TEXTS_PER_BATCH):
+        table_number += 1
+
+        if (
+            table_number >= FIRST_TABLE_NUMBER and
+            table_number <= LAST_TABLE_NUMBER
+        ):
+            step_start = time()
+
+            # Prepare text data:
+            batch_table = duckdb.sql(
+                f'''
+                    SELECT
+                        NEXTVAL('text_id_maker') AS text_id,
+                        title,
+                        published_date AS date,
+                        plain_text AS text
+                    FROM raw_table
+                    WHERE language IN ('bg', 'en')
+                '''
+            ).arrow()
+
+            # Get the number of texts in the batch:
+            batch_texts_total = duckdb.query(
+                '''
+                    SELECT COUNT(text_id) AS texts_total
+                    FROM batch_table
+                '''
+            ).arrow().column('texts_total')[0].as_py()
+
+            message = (
+                f'Batch {str(table_number)}/{str(LAST_TABLE_NUMBER)} - ' +
+                f'total texts: {str(batch_texts_total)}'
+            )
+
+            print(message, flush=True)
+            logger.info(message)
+
+            texts_total += batch_texts_total
+
+            # Write text files:
+            processing_start = time()
+
+            reteti_text_writer(batch_table, '/app/data/texts')
+
+            processing_time = round((time() - processing_start))
+            processing_time_string = str(timedelta(seconds=processing_time))
+
+            message = (
+                f'Batch {str(table_number)}/{str(LAST_TABLE_NUMBER)} - ' +
+                f'text files written for {processing_time_string}'
+            )
+
+            print(message, flush=True)
+            logger.info(message)
+
+            # Upload text files:
+            processing_start = time()
+
+            reteti_file_uploader(
+                tigris_client,
+                os.environ['TEXTS_BUCKET'],
+                'texts',
+                '/app/data/texts',
+                'arrow',
+                f'{str(table_number)}/{str(LAST_TABLE_NUMBER)}'
+            )
+
+            processing_time = round((time() - processing_start))
+            processing_time_string = str(timedelta(seconds=processing_time))
+
+            message = (
+                f'Batch {str(table_number)}/{str(LAST_TABLE_NUMBER)} - ' +
+                f'text files uploaded for {processing_time_string}'
+            )
+
+            print(message, flush=True)
+            logger.info(message)
+
+            # Remove local text files:
+            processing_start = time()
+
+            shutil.rmtree('/app/data/texts', ignore_errors=True)
+
+            processing_time = round((time() - processing_start))
+            processing_time_string = str(timedelta(seconds=processing_time))
+
+            message = (
+                f'Batch {str(table_number)}/{str(LAST_TABLE_NUMBER)} - ' +
+                f'text files removed for {processing_time_string}'
+            )
+
+            print(message, flush=True)
+            logger.info(message)
+
+            # Write index files:
+            processing_start = time()
+
+            batch_table.drop_columns(['title', 'date'])
+
+            reteti_indexer(
+                batch_table,
+                '/app/data/hashes',
+                '/app/data/metadata'
+            )
+
+            processing_time = round((time() - processing_start))
+            processing_time_string = str(timedelta(seconds=processing_time))
+
+            message = (
+                f'Batch {str(table_number)}/{str(LAST_TABLE_NUMBER)} - ' +
+                f'index files created for {processing_time_string}'
+            )
+
+            print(message, flush=True)
+            logger.info(message)
+
+            # Calculate and log the runtime of the current batch:
+            step_time = round((time() - step_start))
+            step_time_string = str(timedelta(seconds=step_time))
+
+            message = (
+                f'Batch {str(table_number)}/{str(LAST_TABLE_NUMBER)} ' +
+                f'processed for {step_time_string}'
+            )
+
+            print(message, flush=True)
+            logger.info(message)
+
+            # Garbage collection:
+            gc.collect()
+
+    # Compact the local index files:
+    processing_start = time()
+
+    reteti_index_compactor(
+        fs.LocalFileSystem(),
+        '/app/data',
+        'hashes',
+        'metadata'
+    )
+
+    processing_time = round((time() - processing_start))
+    processing_time_string = str(timedelta(seconds=processing_time))
+
+    message = f'Local index compacted for {processing_time_string}.'
+    print(message, flush=True)
+    logger.info(message)
+
+    # Upload local index files:
+    processing_start = time()
+
     reteti_file_uploader(
         tigris_client,
         os.environ['INDEX_BUCKET'],
         'hashes',
-        '/app/data/reteti/hashes',
-        'parquet'
+        '/app/data/hashes',
+        'parquet',
+        ''
     )
+
+    processing_time = round((time() - processing_start))
+    processing_time_string = str(timedelta(seconds=processing_time))
+    message = (f'Index files uploaded for {processing_time_string}')
+
+    print(message, flush=True)
+    logger.info(message)
+
+    # Upload local metadata file:
+    processing_start = time()
 
     reteti_file_uploader(
         tigris_client,
-        os.environ['TEXTS_BUCKET'],
-        'texts',
-        '/app/data/reteti/texts',
-        'arrow'
+        os.environ['INDEX_BUCKET'],
+        'metadata',
+        '/app/data/metadata',
+        'parquet',
+        ''
     )
 
-    processing_time = round((time() - processing_start), 3)
+    processing_time = round((time() - processing_start))
+    processing_time_string = str(timedelta(seconds=processing_time))
+    message = (f'Metadata file uploaded for {processing_time_string}')
+
+    print(message, flush=True)
+    logger.info(message)
+
+    # Remove local index files:
+    processing_start = time()
+
+    shutil.rmtree('/app/data/hashes', ignore_errors=True)
+
+    processing_time = round((time() - processing_start))
+    processing_time_string = str(timedelta(seconds=processing_time))
+    message = (f'Index files removed for {processing_time_string}')
+
+    print(message, flush=True)
+    logger.info(message)
+
+    # Remove local metadata file:
+    processing_start = time()
+
+    shutil.rmtree('/app/data/metadata', ignore_errors=True)
+
+    processing_time = round((time() - processing_start))
+    processing_time_string = str(timedelta(seconds=processing_time))
+    message = (f'Metadata file removed for {processing_time_string}')
+
+    print(message, flush=True)
+    logger.info(message)
+
+    # Compact the object storage index files:
+    processing_start = time()
+
+    object_storage_filesystem = fs.S3FileSystem(
+        endpoint_override = os.environ['TIGRIS_ENDPOINT_S3'],
+        access_key        = os.environ['TIGRIS_ACCESS_KEY_ID'],
+        secret_key        = os.environ['TIGRIS_SECRET_ACCESS_KEY'],
+        scheme            = 'https'
+    )
+
+    reteti_index_compactor(
+        object_storage_filesystem,
+        os.environ['INDEX_BUCKET'],
+        'hashes',
+        'metadata'
+    )
+
+    processing_time = round((time() - processing_start))
     processing_time_string = str(timedelta(seconds=processing_time))
 
-    message = f'All texts processed for {processing_time_string}'
+    message = f'Object storage index compacted for {processing_time_string}.'
+    print(message, flush=True)
+    logger.info(message)
+
+    # Get script runtime:
+    script_time = round((time() - script_start))
+    script_time_string = str(timedelta(seconds=script_time))
+
+    message = f'All batches processed for {script_time_string}.'
+    print(message, flush=True)
+    logger.info(message)
+
+    # Log the total number of texts:
+    message = f'Total texts: {str(texts_total)}'
+
     print(message, flush=True)
     logger.info(message)
 

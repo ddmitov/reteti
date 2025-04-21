@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 # Python core modules:
-import datetime
 import os
 import signal
 import threading
@@ -29,9 +28,6 @@ from reteti_text import reteti_text_extractor
 # docker run --rm -it -p 7860:7860 \
 # --user $(id -u):$(id -g) -v $PWD:/app \
 # reteti-demo python /app/demo_searcher.py
-
-# Start the containerized application at http://0.0.0.0:7860/ using:
-# docker run --rm -it -p 7860:7860 reteti-demo
 
 # Global variable for scale-to-zero capability
 # after a period of inactivity:
@@ -66,12 +62,21 @@ def text_searcher(
     index_bucket = None
     texts_bucket = None
 
+    index_prefix = None
+    texts_prefix = None
+
     if os.environ.get('FLY_APP_NAME') is not None:
         index_bucket = os.environ['INDEX_BUCKET']
         texts_bucket = os.environ['TEXTS_BUCKET']
+
+        index_prefix = 'hashes'
+        texts_prefix = 'texts'
     else:
-        index_bucket = '/app/data/reteti'
-        texts_bucket = '/app/data/reteti'
+        index_bucket = '/app/data'
+        texts_bucket = '/app/data'
+
+        index_prefix = 'hashes'
+        texts_prefix = 'texts'
 
     # Hash the search request:
     request_hashing_start = time.time()
@@ -86,6 +91,7 @@ def text_searcher(
     hash_table = reteti_index_reader(
         dataset_filesystem,
         index_bucket,
+        index_prefix,
         hash_list
     )
 
@@ -121,6 +127,7 @@ def text_searcher(
         search_result_table = reteti_text_extractor(
             dataset_filesystem,
             texts_bucket,
+            texts_prefix,
             text_id_table
         )
 
@@ -183,8 +190,6 @@ def activity_inspector():
     inactivity_maximum = int(os.environ['INACTIVITY_MAXIMUM_SECONDS'])
 
     if time.time() - last_activity > inactivity_maximum:
-        print(f'Initiated shutdown sequence at: {datetime.datetime.now()}')
-
         os.kill(os.getpid(), signal.SIGINT)
 
 
@@ -270,16 +275,16 @@ def main():
             with gr.Column(scale=30):
                 gr.Markdown(
                     '''
-                    **License:** Apache License 2.0.  
                     **Repository:** https://github.com/ddmitov/reteti  
+                    **License:** Apache License 2.0.  
                     '''
                 )
 
             with gr.Column(scale=40):
                 gr.Markdown(
                     '''
-                    **Dataset:** [Common Crawl News](https://commoncrawl.org/blog/news-dataset-available) - 2021 - 1 000 000 articles  
-                    https://huggingface.co/datasets/CloverSearch/cc-news-mutlilingual  
+                    **Dataset:** Common Crawl News  
+                    https://huggingface.co/datasets/stanford-oval/ccnews  
                     '''
                 )
 
@@ -293,16 +298,10 @@ def main():
             with gr.Column(scale=3):
                 gr.Examples(
                     [
-                        'COVID-19 pandemic',
-                        'vaccination campaign',
-                        'vaccine nationalism',
-                        'remote work',
                         'virtual learning',
                         'digital economy',
                         'international trade',
-                        'pharmaceutical industry',
-                        'ваксина срещу COVID-19',
-                        'ваксина срещу коронавирус',
+                        'София',
                         'околна среда'
                     ],
                     fn=text_searcher,

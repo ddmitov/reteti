@@ -15,11 +15,11 @@ This paradigm influenced heavily the partitioned index of Reteti which is never 
 
 ## Python Modules
 
-https://huggingface.co/docs/tokenizers/index  
 https://arrow.apache.org/docs/python/api.html  
 https://duckdb.org/docs/  
+https://huggingface.co/docs/datasets/index  
+https://huggingface.co/docs/tokenizers/index  
 https://min.io/docs/minio/linux/developers/python/API.html  
-https://huggingface.co/docs/huggingface_hub/index  
 https://www.gradio.app/docs  
 
 ## Services
@@ -30,8 +30,7 @@ https://www.tigrisdata.com/docs/overview/
 ## Dataset
 
 https://commoncrawl.org/blog/news-dataset-available  
-https://huggingface.co/datasets/CloverSearch/cc-news-mutlilingual  
-https://huggingface.co/datasets/CloverSearch/data_article_count  
+https://huggingface.co/datasets/stanford-oval/ccnews  
 
 ## Stack Overflow
 
@@ -39,8 +38,8 @@ https://stackoverflow.com/questions/2564137/how-to-terminate-a-thread-when-main-
 
 ## AI
 
-https://claude.ai/  
 https://chat.deepseek.com/  
+https://claude.ai/  
 https://cloud.sambanova.ai/  
 
 ## Icon

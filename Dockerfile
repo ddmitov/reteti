@@ -9,8 +9,8 @@ RUN pip install --no-cache \
 
 # Demo-related modules:
 RUN pip install --no-cache \
+    datasets               \
     gradio                 \
-    huggingface-hub        \
     pandas                 \
     python-dotenv
 

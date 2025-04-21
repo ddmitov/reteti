@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 
-# Python core modules:
-from datetime import timedelta
-from time     import time
+# Python core module:
+import os
 
 # Python PIP modules:
 import duckdb
@@ -12,21 +11,9 @@ import pyarrow.fs      as fs
 
 
 def reteti_text_writer(
-    batch_number:  int,
-    batches_total: int,
-    batch_table:   pa.Table,
-    logger:        object
-) -> list:
-    text_file_paths = []
-
-
-    def text_file_visitor(written_file):
-        text_file_paths.append(written_file.path)
-
-
-    # Start measuring time:
-    processing_start = time()
-
+    batch_table:    pa.Table,
+    base_directory: str
+) -> True:
     text_table = duckdb.sql(
         f'''
             SELECT
@@ -38,59 +25,48 @@ def reteti_text_writer(
         '''
     ).arrow()
 
-    text_id_total = duckdb.query(
+    partitions_total = duckdb.query(
         '''
-            SELECT COUNT(text_id) AS text_id_total
+            SELECT COUNT(text_id) AS texts_total
             FROM text_table
         '''
-    ).arrow().column('text_id_total')[0].as_py()
+    ).arrow().column('texts_total')[0].as_py()
+
+    os.makedirs(base_directory, exist_ok=True)
 
     ds.write_dataset(
         text_table,
         format                 = 'arrow',
         filesystem             = fs.LocalFileSystem(),
-        base_dir               = f'/app/data/reteti-texts/texts',
+        base_dir               = base_directory,
         partitioning           = ['partition'],
         basename_template      = 'part-{i}.arrow',
         existing_data_behavior = 'overwrite_or_ignore',
-        max_partitions         = text_id_total,
-        file_visitor           = text_file_visitor
+        max_partitions         = partitions_total
     )
 
-    # Calculate, display and log processing time:
-    processing_time        = round((time() - processing_start), 3)
-    processing_time_string = str(timedelta(seconds=processing_time))
-
-    message = (
-        f'Text batch {str(batch_number)}/{str(batches_total)} ' +
-        f'written for {processing_time_string}'
-    )
-
-    print(message, flush=True)
-    logger.info(message)
-
-    return text_file_paths
+    return True
 
 
 def reteti_text_extractor(
-    dataset_filesystem: fs.S3FileSystem,
-    bucket:             str,
-    text_id_table:      pa.Table
+    texts_filesystem: fs.S3FileSystem,
+    texts_bucket:     str,
+    texts_prefix:     str,
+    text_id_table:    pa.Table
 ) -> pa.Table:
     text_id_list = text_id_table.column('text_id').to_pylist()
 
     text_paths = [
-        f'{bucket}/texts/{text_id}/part-0.arrow'
+        f'{texts_bucket}/{texts_prefix}/{text_id}/part-0.arrow'
         for text_id in text_id_list
     ]
 
     text_table = ds.dataset(
         text_paths,
         format     = 'arrow',
-        filesystem = dataset_filesystem
+        filesystem = texts_filesystem
     ).to_table(
-        use_threads        = True,
-        fragment_readahead = 16
+        use_threads = True
     )
 
     search_result_table = duckdb.query(
