@@ -3,6 +3,7 @@
 # Python core modules:
 from   datetime             import datetime
 import hashlib
+import io
 from   multiprocessing      import cpu_count
 from   multiprocessing.pool import ThreadPool
 import os
@@ -11,10 +12,10 @@ from   typing               import List
 
 # Python PIP modules:
 import duckdb
-from   minio import Minio
+from   minio           import Minio
 import pyarrow         as pa
+import pyarrow.dataset as ds
 import pyarrow.fs      as fs
-import pyarrow.parquet as pq
 from   tokenizers      import normalizers
 from   tokenizers      import pre_tokenizers
 
@@ -38,17 +39,11 @@ def reteti_list_splitter(
 
 
 def reteti_indexer(
-    text_table:         pa.Table,
-    index_root_path:    str,
-    metadata_root_path: str
+    bins_total:           int,
+    text_table:           pa.Table,
+    index_base_directory: str,
+    stopword_set:         set
 ) -> True:
-    hash_path_list = []
-
-
-    def hash_file_visitor(written_file):
-        hash_path_list.append(written_file.path)
-
-
     # Extract the 'text_id' and 'text' Arrow table columns as lists:
     text_id_list = text_table.column('text_id').to_pylist()
     text_list    = text_table.column('text').to_pylist()
@@ -92,10 +87,10 @@ def reteti_indexer(
 
     # Iterate all texts in a batch:
     for text_id, word_list in zip(text_id_list, words_batch):
-        # Hash every word in every text:
         hash_list = [
             hashlib.blake2b(word.encode(), digest_size=64).hexdigest()
             for word in word_list
+            if word not in stopword_set
         ]
 
         # Dictionary of lists:
@@ -112,8 +107,11 @@ def reteti_indexer(
         for hashed_word in hash_list:
             hashed_word_item = {}
 
+            bin_number = (int(hashed_word, 16) % bins_total) + 1
+
+            hashed_word_item['bin']         = int(bin_number)
             hashed_word_item['hash']        = str(hashed_word)
-            hashed_word_item['text_id']     = str(text_id)
+            hashed_word_item['text_id']     = int(text_id)
             hashed_word_item['positions']   = positions[hashed_word]
             hashed_word_item['total_words'] = int(total_words)
 
@@ -124,277 +122,105 @@ def reteti_indexer(
     hash_table = duckdb.sql(
         '''
             SELECT
-                hash,
-                text_id,
-                positions,
-                total_words
+                CURRENT_TIMESTAMP AS generation_timestamp,
+                *
             FROM hash_table
-            ORDER BY hash ASC
+            ORDER BY bin
         '''
     ).arrow()
 
-    partitions_number = duckdb.query(
-        '''
-            SELECT COUNT(DISTINCT hash) AS partitions
-            FROM hash_table
-        '''
-    ).arrow().column('partitions')[0].as_py()
-
     diff_string = datetime.now().strftime('%Y-%m-%d--%H-%M-%S').strip()
 
-    os.makedirs(index_root_path, exist_ok=True)
+    os.makedirs(index_base_directory, exist_ok=True)
 
-    pq.write_to_dataset(
+    ds.write_dataset(
         hash_table,
+        format                 = 'arrow',
         filesystem             = fs.LocalFileSystem(),
-        root_path              = index_root_path,
-        partitioning           = ['hash'],
-        basename_template      = 'part-{{i}}--{}.parquet'.format(diff_string),
+        base_dir               = index_base_directory,
+        partitioning           = ['bin'],
+        basename_template      = 'part-{{i}}--{}.arrow'.format(diff_string),
         existing_data_behavior = 'overwrite_or_ignore',
-        max_partitions         = int(partitions_number),
-        file_visitor           = hash_file_visitor
-    )
-
-    # Add data to the metadata dataset:
-    metadata_table = pa.Table.from_arrays(
-        [pa.array(hash_path_list)],
-        names = ['path']
-    )
-
-    metadata_table = duckdb.sql(
-        '''
-            SELECT
-                REGEXP_EXTRACT(path, '[0-9a-f]{128}')  AS hash,
-                REGEXP_EXTRACT(path, 'part.*parquet$') AS filename
-            FROM metadata_table
-        '''
-    ).arrow()
-
-    os.makedirs(metadata_root_path, exist_ok=True)
-
-    pq.write_table(
-        metadata_table,
-        f'{metadata_root_path}/metadata--{diff_string}.parquet',
-        filesystem = fs.LocalFileSystem()
+        max_partitions         = bins_total
     )
 
     return True
 
 
-def reteti_index_compactor(
-    index_filesystem: fs.S3FileSystem,
-    index_bucket:     str,
-    index_prefix:     str,
-    metadata_prefix:  str
+def reteti_index_formatter(
+    bins_total:             int,
+    generation_timestamp:   datetime,
+    binned_index_directory: str,
+    index_directory:        str
 ) -> True:
-    metadata_table = pq.ParquetDataset(
-        f'{index_bucket}/{metadata_prefix}',
-        filesystem = index_filesystem
-    ).read()
+    bin_list = list(range(1, bins_total))
 
-    non_fragmented_hashes_table = duckdb.query(
-        '''
-            SELECT
-                hash,
-                COUNT(filename) AS files
-            FROM metadata_table
-            GROUP BY hash
-            HAVING files = 1
-        '''
-    ).arrow()
+    for bin_number in bin_list:
+        bin_table = ds.dataset(
+            f'{binned_index_directory}/{bin_number}',
+            format     = 'arrow',
+            filesystem = fs.LocalFileSystem()
+        ).to_table()
 
-    compaction_candidates_table = duckdb.query(
-        '''
-            SELECT
-                hash,
-                COUNT(filename) AS files
-            FROM metadata_table
-            GROUP BY hash
-            HAVING files > 1
-        '''
-    ).arrow()
+        hashes_table = duckdb.query(
+            f'''
+                SELECT hash
+                FROM bin_table
+                WHERE generation_timestamp > '{generation_timestamp.isoformat()}'
+                GROUP BY hash
+            '''
+        ).arrow()
 
-    compaction_candidates_list = \
-        compaction_candidates_table.column('hash').to_pylist()
+        hash_list = hashes_table.column('hash').to_pylist()
 
-    if len(compaction_candidates_list) == 0:
-        return True
+        if len(hash_list) > 0:
+            hash_number = 0
 
-    hash_batch_list = reteti_list_splitter(
-        compaction_candidates_list,
-        cpu_count()
-    )
+            for hash_item in hash_list:
+                hash_number += 1
 
-    thread_pool = ThreadPool(cpu_count())
+                hash_table = duckdb.query(
+                    f'''
+                        SELECT
+                            text_id,
+                            positions,
+                            total_words
+                        FROM bin_table
+                        WHERE hash = '{hash_item}'
+                    '''
+                ).arrow()
 
-    index_compactor_worker_arguments = [
-        (
-            index_filesystem,
-            index_bucket,
-            index_prefix,
-            hash_batch,
-            core_number
-        )
-        for hash_batch, core_number in zip(
-            hash_batch_list,
-            range(cpu_count())
-        )
-    ]
+                os.makedirs(
+                    f'{index_directory}/{hash_item}',
+                    exist_ok=True
+                )
 
-    result = thread_pool.starmap_async(
-        reteti_index_compactor_worker,
-        index_compactor_worker_arguments
-    )
+                with pa.OSFile(
+                    f'{index_directory}/{hash_item}/data.arrow',
+                    'wb'
+                ) as sink:
+                    writer = pa.RecordBatchFileWriter(sink, hash_table.schema)
+                    writer.write_table(hash_table)
+                    writer.close()
 
-    result.get()
+                message = (
+                    f'Bin {str(bin_number)}/{str(bins_total)} - ' +
+                    f'{str(hash_number)}/{str(len(hash_list))} - ' +
+                    f'{hash_item}'
+                )
 
-    updated_metadata_table = duckdb.query(
-        '''
-            SELECT
-                mt.hash,
-                mt.filename
-            FROM
-                metadata_table AS mt
-                INNER JOIN non_fragmented_hashes_table AS nfht
-                    ON nfht.hash = mt.hash
-            UNION
-            SELECT
-                mt.hash,
-                'compacted.parquet' AS filename
-            FROM
-                metadata_table AS mt
-                INNER JOIN compaction_candidates_table AS cct
-                    ON cct.hash = mt.hash
-        '''
-    ).arrow()
-
-    index_filesystem.delete_dir(f'{index_bucket}/{metadata_prefix}')
-
-    index_filesystem.create_dir(f'{index_bucket}/{metadata_prefix}')
-
-    diff_string = datetime.now().strftime('%Y-%m-%d--%H-%M-%S').strip()
-
-    pq.write_table(
-        updated_metadata_table,
-        f'{index_bucket}/{metadata_prefix}/metadata--{diff_string}.parquet',
-        filesystem = index_filesystem
-    )
-
-    file_removal_table = duckdb.query(
-        '''
-            SELECT
-                mt.hash,
-                mt.filename
-            FROM
-                metadata_table AS mt
-                INNER JOIN compaction_candidates_table AS cct
-                    ON cct.hash = mt.hash
-        '''
-    ).arrow()
-
-    removal_filepath_list = []
-
-    compacted_hashes_list = file_removal_table.column('hash').to_pylist()
-    files_to_remove_list  = file_removal_table.column('filename').to_pylist()
-
-    for hash_item, filename in zip(
-        compacted_hashes_list,
-        files_to_remove_list
-    ):
-        removal_filepath_list.append(
-            f'{index_bucket}/{index_prefix}/{hash_item}/{filename}'
-        )
-
-    removal_filepath_batch_list = reteti_list_splitter(
-        removal_filepath_list,
-        cpu_count()
-    )
-
-    file_remover_worker_arguments = [
-        (
-            index_filesystem,
-            filepath_batch,
-            core_number
-        )
-        for filepath_batch, core_number in zip(
-            removal_filepath_batch_list,
-            range(cpu_count())
-        )
-    ]
-
-    result = thread_pool.starmap_async(
-        reteti_file_remover_worker,
-        file_remover_worker_arguments
-    )
-
-    result.get()
-
-    return True
-
-
-def reteti_index_compactor_worker(
-    index_filesystem: fs.S3FileSystem,
-    index_bucket:     str,
-    index_prefix:     str,
-    hash_list:        list,
-    core_number:      int
-) -> True:
-    hash_number = 0
-
-    for hash_item in hash_list:
-        hash_number += 1
-
-        hash_table = pq.ParquetDataset(
-            f'{index_bucket}/{index_prefix}/{hash_item}',
-            filesystem = index_filesystem
-        ).read(use_threads = False)
-
-        pq.write_table(
-            hash_table,
-            f'{index_bucket}/{index_prefix}/{hash_item}/compacted.parquet',
-            filesystem = index_filesystem
-        )
-
-        message = (
-            f'Compaction - core {str(core_number)} - ' +
-            f'{str(hash_number)}/{str(len(hash_list))} - ' +
-            f'{hash_item}'
-        )
-
-        print(message, flush=True)
-
-    return True
-
-
-def reteti_file_remover_worker(
-    index_filesystem: fs.S3FileSystem,
-    filepath_list:    list,
-    core_number:      int
-) -> True:
-    filepath_number = 0
-
-    for filepath in filepath_list:
-        filepath_number += 1
-
-        index_filesystem.delete_file(filepath)
-
-        message = (
-            f'Deletion - core {str(core_number)} - ' +
-            f'{str(filepath_number)}/{str(len(filepath_list))}'
-        )
-
-        print(message, flush=True)
+                print(message, flush=True)
 
     return True
 
 
 def reteti_file_uploader(
-    client:         Minio,
-    bucket_name:    str,
-    prefix:         str,
-    directory:      str,
-    file_extension: str,
-    message_header: str
+    object_storage_client: Minio,
+    bucket_name:           str,
+    prefix:                str,
+    directory:             str,
+    file_extension:        str,
+    message_header:        str
 ) -> True:
     file_paths = list(Path(directory).rglob(f'*.{file_extension}'))
     file_paths_batch_list = reteti_list_splitter(file_paths, cpu_count())
@@ -403,7 +229,7 @@ def reteti_file_uploader(
 
     file_uploader_worker_arguments = [
         (
-            client,
+            object_storage_client,
             bucket_name,
             prefix,
             directory,
@@ -422,19 +248,19 @@ def reteti_file_uploader(
         file_uploader_worker_arguments
     )
 
-    result_list = result.get()
+    result.get()
 
     return True
 
 
 def reteti_file_uploader_worker(
-    client:           Minio,
-    bucket_name:      str,
-    prefix:           str,
-    directory:        str,
-    file_paths_batch: list,
-    core_number:      int,
-    message_header:   str
+    object_storage_client: Minio,
+    bucket_name:           str,
+    prefix:                str,
+    directory:             str,
+    file_paths_batch:      list,
+    core_number:           int,
+    message_header:        str
 ) -> True:
     file_number = 0
 
@@ -444,7 +270,7 @@ def reteti_file_uploader_worker(
         object_name = str(file_path).replace(f'{directory}/', '')
 
         try:
-            client.fput_object(
+            object_storage_client.fput_object(
                 bucket_name,
                 prefix + '/' + object_name,
                 file_path,
@@ -465,7 +291,7 @@ def reteti_file_uploader_worker(
     return True
 
 
-def reteti_request_hasher(search_request: str) -> list:
+def reteti_request_hasher(stopword_set: set, search_request: str) -> list:
     normalizer = normalizers.Sequence(
         [
             normalizers.NFD(),          # Decompose Unicode characters
@@ -488,15 +314,21 @@ def reteti_request_hasher(search_request: str) -> list:
         pre_tokenizer.pre_tokenize_str(normalized_search_request)
 
     hash_list = [
-        hashlib.blake2b(word_tuple[0].encode(), digest_size=64).hexdigest()
+        str(
+            hashlib.blake2b(
+                word_tuple[0].encode(),
+                digest_size=64
+            ).hexdigest()
+        )
         for word_tuple in pre_tokenized_search_request
+        if word_tuple[0] not in stopword_set
     ]
 
     return hash_list
 
 
 def reteti_index_reader(
-    index_filesystem: fs.S3FileSystem,
+    object_storage_client: Minio,
     index_bucket:     str,
     index_prefix:     str,
     hash_list:        list
@@ -506,7 +338,7 @@ def reteti_index_reader(
 
     index_reader_worker_arguments = [
         (
-            index_filesystem,
+            object_storage_client,
             index_bucket,
             index_prefix,
             hash_item,
@@ -541,7 +373,7 @@ def reteti_index_reader(
 
 
 def reteti_index_reader_worker(
-    index_filesystem: fs.S3FileSystem,
+    object_storage_client: Minio,
     index_bucket:     str,
     index_prefix:     str,
     hash_item:        str,
@@ -550,12 +382,13 @@ def reteti_index_reader_worker(
     hash_table = None
 
     try:
-        raw_hash_table = pq.ParquetDataset(
-            f'{index_bucket}/{index_prefix}/{hash_item}',
-            filesystem = index_filesystem
-        ).read(
-            use_threads = True
+        remote_response = object_storage_client.get_object(
+            index_bucket,
+            f'{index_prefix}/{hash_item}/data.arrow'
         )
+
+        arrow_buffer = io.BytesIO(remote_response.read())
+        raw_hash_table = pa.ipc.open_file(arrow_buffer).read_all()
 
         alias_array = pa.array([hash_alias] * raw_hash_table.num_rows)
         hash_table = raw_hash_table.add_column(0, 'alias', alias_array)

@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 
 # Python core modules:
+import json
 import os
 import signal
 import threading
 import time
-from   typing import List
 
 # Python PIP modules:
-from   dotenv     import find_dotenv
-from   dotenv     import load_dotenv
-from   fastapi    import FastAPI
-import pyarrow.fs as     fs
-import gradio     as     gr
+from   dotenv       import find_dotenv
+from   dotenv       import load_dotenv
+from   fastapi      import FastAPI
+from   minio        import Minio
+import gradio       as     gr
+import stopwordsiso as stopwords
 import uvicorn
 
 # Reteti core module:
@@ -22,16 +23,18 @@ from reteti_core import reteti_single_word_searcher
 from reteti_core import reteti_multiple_words_searcher
 
 # Reteti supplementary module:
-from reteti_text import reteti_text_extractor
+from reteti_text import reteti_text_reader
 
 # Start the application for local development at http://0.0.0.0:7860/ using:
 # docker run --rm -it -p 7860:7860 \
 # --user $(id -u):$(id -g) -v $PWD:/app \
 # reteti-demo python /app/demo_searcher.py
 
-# Global variable for scale-to-zero capability
-# after a period of inactivity:
+# Global variable for scale-to-zero capability after a period of inactivity:
 last_activity = None
+
+# Global variable for stopwords:
+stopword_set = None
 
 # Load settings from .env file:
 load_dotenv(find_dotenv())
@@ -45,51 +48,35 @@ def text_searcher(
     global last_activity
     last_activity = time.time()
 
-    # Initialize Parquet dataset filesystem:
-    dataset_filesystem = None
+    # Set buckets and prefixes:
+    index_bucket = os.environ['INDEX_BUCKET']
+    texts_bucket = os.environ['TEXTS_BUCKET']
 
-    if os.environ.get('FLY_APP_NAME') is not None:
-        dataset_filesystem = fs.S3FileSystem(
-            endpoint_override = os.environ['TIGRIS_ENDPOINT_S3'],
-            access_key        = os.environ['TIGRIS_ACCESS_KEY_ID'],
-            secret_key        = os.environ['TIGRIS_SECRET_ACCESS_KEY'],
-            scheme            = 'https'
-        )
-    else:
-        dataset_filesystem = fs.LocalFileSystem()
+    index_prefix = 'hashes'
+    texts_prefix = 'texts'
 
-    # Set buckets:
-    index_bucket = None
-    texts_bucket = None
-
-    index_prefix = None
-    texts_prefix = None
-
-    if os.environ.get('FLY_APP_NAME') is not None:
-        index_bucket = os.environ['INDEX_BUCKET']
-        texts_bucket = os.environ['TEXTS_BUCKET']
-
-        index_prefix = 'hashes'
-        texts_prefix = 'texts'
-    else:
-        index_bucket = '/app/data'
-        texts_bucket = '/app/data'
-
-        index_prefix = 'hashes'
-        texts_prefix = 'texts'
+    # Use the global stopwords set:
+    global stopword_set
 
     # Hash the search request:
     request_hashing_start = time.time()
 
-    hash_list = reteti_request_hasher(search_request)
+    hash_list = reteti_request_hasher(stopword_set, search_request)
 
     request_hashing_time = round((time.time() - request_hashing_start), 3)
 
     # Read the hashed words index data:
     index_reading_start = time.time()
 
+    object_storage_client = Minio(
+        os.environ['ENDPOINT_S3'],
+        access_key = os.environ['ACCESS_KEY_ID'],
+        secret_key = os.environ['SECRET_ACCESS_KEY'],
+        secure     = True
+    )
+
     hash_table = reteti_index_reader(
-        dataset_filesystem,
+        object_storage_client,
         index_bucket,
         index_prefix,
         hash_list
@@ -124,14 +111,14 @@ def text_searcher(
     search_result_dataframe = None
 
     if text_id_table is not None:
-        search_result_table = reteti_text_extractor(
-            dataset_filesystem,
+        search_result_table = reteti_text_reader(
+            object_storage_client,
             texts_bucket,
             texts_prefix,
             text_id_table
         )
 
-        search_result_dataframe = search_result_table.to_pandas() 
+        search_result_dataframe = search_result_table.to_pandas()
 
     search_result = {}
 
@@ -152,8 +139,8 @@ def text_searcher(
     total_time = round(
         (
             request_hashing_time +
-            index_reading_time +
-            search_time +
+            index_reading_time   +
+            search_time          +
             text_extraction_time
         ),
         3
@@ -170,7 +157,7 @@ def text_searcher(
     if len(hash_list) > 1:
         info['reteti_multiple_words_searcher() runtime in seconds'] = search_time
 
-    info['reteti_text_extractor() ........ runtime in seconds'] = text_extraction_time
+    info['reteti_text_reader() ........... runtime in seconds'] = text_extraction_time
     info['Reteti functions total ......... runtime in seconds'] = total_time
 
     return info, search_result
@@ -194,12 +181,43 @@ def activity_inspector():
 
 
 def main():
+    # Get the number of indexed texts:
+    object_storage_client = Minio(
+        os.environ['ENDPOINT_S3'],
+        access_key = os.environ['ACCESS_KEY_ID'],
+        secret_key = os.environ['SECRET_ACCESS_KEY'],
+        secure     = True
+    )
+
+    json_data = None
+
+    texts_total = 0
+
+    try:
+        response = object_storage_client.get_object(
+            os.environ['INDEX_BUCKET'],
+            'metadata/metadata.json'
+        )
+
+        json_data = json.loads(response.read().decode('utf-8'))
+    except Exception:
+        pass
+
+    try:
+        texts_total = json_data['texts_total']
+    except Exception:
+        pass
+
     # Matplotlib writable config directory,
     # Matplotlib is a dependency of Gradio:
     os.environ['MPLCONFIGDIR'] = '/app/data/.config/matplotlib'
 
     # Disable Gradio telemetry:
     os.environ['GRADIO_ANALYTICS_ENABLED'] = 'False'
+
+    # Initialize a stopwords list:
+    global stopword_set
+    stopword_set = stopwords.stopwords(['bg', 'en'])
 
     # Define Gradio user interface:
     request_box = gr.Textbox(lines=1, label='Search Request')
@@ -288,6 +306,13 @@ def main():
                     '''
                 )
 
+            with gr.Column(scale=30):
+                gr.Markdown(
+                    f'''
+                    **Total texts:** {texts_total}  
+                    '''
+                )
+
         with gr.Row():
             request_box.render()
 
@@ -299,8 +324,8 @@ def main():
                 gr.Examples(
                     [
                         'virtual learning',
-                        'digital economy',
                         'international trade',
+                        'international relations',
                         'София',
                         'околна среда'
                     ],

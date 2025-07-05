@@ -10,9 +10,11 @@ RUN pip install --no-cache \
 # Demo-related modules:
 RUN pip install --no-cache \
     datasets               \
-    gradio                 \
+    "gradio <= 5.34.0"     \
     pandas                 \
-    python-dotenv
+    python-dotenv          \
+    setuptools             \
+    stopwordsiso
 
 # Demo application files:
 COPY ./.env             /home/reteti/.env

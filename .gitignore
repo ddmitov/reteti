@@ -2,5 +2,7 @@
 data
 
 .env
+*.txt
+
 backup
 upgit

@@ -3,27 +3,27 @@
 # Python core modules:
 from   datetime import datetime
 from   datetime import timedelta
+from   datetime import timezone
 import gc
+from   io       import BytesIO
+import json
 import logging
 import os
 import shutil
 from   time     import time
-from   typing   import List
 
 # Python PIP modules:
-from   datasets        import load_dataset
-from   dotenv          import find_dotenv
-from   dotenv          import load_dotenv
+from   datasets     import load_dataset
+from   dotenv       import find_dotenv
+from   dotenv       import load_dotenv
 import duckdb
-from   minio           import Minio
-import pyarrow         as     pa
-import pyarrow.dataset as     ds
-import pyarrow.fs      as     fs
+from   minio        import Minio
+import stopwordsiso as stopwords
 
 # Reteti core module:
 from reteti_core import reteti_indexer
+from reteti_core import reteti_index_formatter
 from reteti_core import reteti_file_uploader
-from reteti_core import reteti_index_compactor
 
 # Reteti supplementary module:
 from reteti_text import reteti_text_writer
@@ -56,51 +56,80 @@ def logger_starter() -> logging.Logger:
 
 
 def main():
+    YEAR = '2024'
+
     FIRST_TABLE_NUMBER = 1
-    LAST_TABLE_NUMBER  = 60
+    LAST_TABLE_NUMBER  = 200
     TEXTS_PER_BATCH    = 25000
 
+    BINS_TOTAL = 100
+
+    # Start measuring runtime and set logging:
     script_start = time()
     logger = logger_starter()
 
-    # Tigris object storage client:
-    tigris_client = Minio(
-        os.environ['TIGRIS_ENDPOINT_S3'],
-        access_key = os.environ['TIGRIS_ACCESS_KEY_ID'],
-        secret_key = os.environ['TIGRIS_SECRET_ACCESS_KEY'],
+    # Set object storage client:
+    object_storage_client = Minio(
+        os.environ['ENDPOINT_S3'],
+        access_key = os.environ['ACCESS_KEY_ID'],
+        secret_key = os.environ['SECRET_ACCESS_KEY'],
         secure     = True
     )
 
-    # Process the dataset:
-    processing_start = time()
+    # Initialize a stopwords list:
+    stopword_set = stopwords.stopwords(['bg', 'en'])
 
-    dataset = load_dataset(
-        path  = 'stanford-oval/ccnews',
-        split = 'train',
-        name  = '2016'
-    )
+    # Get the number of the already indexed texts:
+    json_data = None
 
-    dataset = dataset.with_format('arrow')
+    previous_texts_total = 0
+    generation_timestamp = datetime.now(timezone.utc)
 
-    processing_time = round((time() - processing_start))
-    processing_time_string = str(timedelta(seconds=processing_time))
+    try:
+        response = object_storage_client.get_object(
+            os.environ['INDEX_BUCKET'],
+            'metadata/metadata.json'
+        )
 
-    message = f'Dataset processed for {processing_time_string}'
+        json_data = json.loads(response.read().decode('utf-8'))
+    except Exception:
+        pass
+
+    try:
+        previous_texts_total = json_data['texts_total']
+    except Exception:
+        pass
+
+    try:
+        generation_timestamp = datetime.fromisoformat(
+            json_data['generation_timestamp']
+        )
+    except Exception:
+        pass
+
+    message = f'Texts from previous script runs: {str(previous_texts_total)}'
 
     print(message, flush=True)
     logger.info(message)
 
-    # Set DuckDB sequence:
-    sequence_start = 1
-
-    if FIRST_TABLE_NUMBER > 1:
-        sequence_start = ((FIRST_TABLE_NUMBER - 1) * TEXTS_PER_BATCH) + 1
+    # Set DuckDB sequence for the generation of text_id numbers:
+    sequence_start = previous_texts_total + 1
 
     duckdb.sql(f'CREATE SEQUENCE text_id_maker START {str(sequence_start)}')
 
-    # Iterate all text batches:
+    # Initialize the dataset:
+    print('Reading dataset ...', flush=True)
+
+    dataset = load_dataset(
+        path      = 'stanford-oval/ccnews',
+        split     = 'train',
+        name      = YEAR,
+        streaming = True
+    ).with_format('arrow')
+
+    # Iterate the dataset:
     table_number = 0
-    texts_total  = 0
+    script_run_texts_total = 0
 
     for raw_table in dataset.iter(batch_size=TEXTS_PER_BATCH):
         table_number += 1
@@ -140,9 +169,9 @@ def main():
             print(message, flush=True)
             logger.info(message)
 
-            texts_total += batch_texts_total
+            script_run_texts_total += batch_texts_total
 
-            # Write text files:
+            # Write local text files:
             processing_start = time()
 
             reteti_text_writer(batch_table, '/app/data/texts')
@@ -161,13 +190,18 @@ def main():
             # Upload text files:
             processing_start = time()
 
+            message_header = (
+                f'Batch {str(table_number)}/{str(LAST_TABLE_NUMBER)} - ' +
+                'text uploader core'
+            )
+
             reteti_file_uploader(
-                tigris_client,
+                object_storage_client,
                 os.environ['TEXTS_BUCKET'],
                 'texts',
                 '/app/data/texts',
                 'arrow',
-                f'{str(table_number)}/{str(LAST_TABLE_NUMBER)}'
+                message_header
             )
 
             processing_time = round((time() - processing_start))
@@ -197,15 +231,16 @@ def main():
             print(message, flush=True)
             logger.info(message)
 
-            # Write index files:
+            # Write binned index:
             processing_start = time()
 
             batch_table.drop_columns(['title', 'date'])
 
             reteti_indexer(
+                BINS_TOTAL,
                 batch_table,
-                '/app/data/hashes',
-                '/app/data/metadata'
+                '/app/data/binned_index',
+                stopword_set
             )
 
             processing_time = round((time() - processing_start))
@@ -224,130 +259,104 @@ def main():
             step_time_string = str(timedelta(seconds=step_time))
 
             message = (
-                f'Batch {str(table_number)}/{str(LAST_TABLE_NUMBER)} ' +
+                f'Batch {str(table_number)}/{str(LAST_TABLE_NUMBER)} - ' +
                 f'processed for {step_time_string}'
             )
 
             print(message, flush=True)
             logger.info(message)
 
-            # Garbage collection:
-            gc.collect()
+        if table_number == LAST_TABLE_NUMBER:
+            break
 
-    # Compact the local index files:
+        # Garbage collection:
+        gc.collect()
+
+    # Format the binned index:
     processing_start = time()
 
-    reteti_index_compactor(
-        fs.LocalFileSystem(),
-        '/app/data',
-        'hashes',
-        'metadata'
+    reteti_index_formatter(
+        BINS_TOTAL,
+        generation_timestamp,
+        '/app/data/binned_index',
+        '/app/data/index'
     )
 
     processing_time = round((time() - processing_start))
     processing_time_string = str(timedelta(seconds=processing_time))
 
-    message = f'Local index compacted for {processing_time_string}.'
+    message = f'Index formatted for {processing_time_string}.'
     print(message, flush=True)
     logger.info(message)
 
-    # Upload local index files:
+    # Upload formatted index files:
     processing_start = time()
 
     reteti_file_uploader(
-        tigris_client,
+        object_storage_client,
         os.environ['INDEX_BUCKET'],
-        'hashes',
-        '/app/data/hashes',
-        'parquet',
-        ''
+        'index',
+        '/app/data/index',
+        'arrow',
+        'Index uploader core'
     )
 
     processing_time = round((time() - processing_start))
     processing_time_string = str(timedelta(seconds=processing_time))
-    message = (f'Index files uploaded for {processing_time_string}')
+    message = (f'Index uploaded for {processing_time_string}')
 
     print(message, flush=True)
     logger.info(message)
 
-    # Upload local metadata file:
+    # Remove all formatted index files:
     processing_start = time()
 
-    reteti_file_uploader(
-        tigris_client,
-        os.environ['INDEX_BUCKET'],
-        'metadata',
-        '/app/data/metadata',
-        'parquet',
-        ''
+    shutil.rmtree('/app/data/index', ignore_errors=True)
+
+    processing_time = round((time() - processing_start))
+    processing_time_string = str(timedelta(seconds=processing_time))
+    message = (f'Index removed for {processing_time_string}')
+
+    print(message, flush=True)
+    logger.info(message)
+
+    # Remove all dataset files:
+    shutil.rmtree('/app/data/huggingface', ignore_errors=True)
+
+    # Save the total texts number and the generation timestamp:
+    combined_texts_total = previous_texts_total + script_run_texts_total
+    generation_timestamp = datetime.now(timezone.utc)
+
+    updated_json_data = {
+        'texts_total':          combined_texts_total,
+        'generation_timestamp': generation_timestamp.isoformat()
+    }
+
+    json_bytes = json.dumps(updated_json_data, indent=4).encode('utf-8')
+
+    object_storage_client.put_object(
+        bucket_name  = os.environ['INDEX_BUCKET'],
+        object_name  = 'metadata/metadata.json',
+        data         = BytesIO(json_bytes),
+        length       = len(json_bytes),
+        content_type = 'application/json'
     )
 
-    processing_time = round((time() - processing_start))
-    processing_time_string = str(timedelta(seconds=processing_time))
-    message = (f'Metadata file uploaded for {processing_time_string}')
+    message = f'Texts from this script run: {str(script_run_texts_total)}'
 
     print(message, flush=True)
     logger.info(message)
 
-    # Remove local index files:
-    processing_start = time()
-
-    shutil.rmtree('/app/data/hashes', ignore_errors=True)
-
-    processing_time = round((time() - processing_start))
-    processing_time_string = str(timedelta(seconds=processing_time))
-    message = (f'Index files removed for {processing_time_string}')
+    message = f'Total texts: {str(combined_texts_total)}'
 
     print(message, flush=True)
     logger.info(message)
 
-    # Remove local metadata file:
-    processing_start = time()
-
-    shutil.rmtree('/app/data/metadata', ignore_errors=True)
-
-    processing_time = round((time() - processing_start))
-    processing_time_string = str(timedelta(seconds=processing_time))
-    message = (f'Metadata file removed for {processing_time_string}')
-
-    print(message, flush=True)
-    logger.info(message)
-
-    # Compact the object storage index files:
-    processing_start = time()
-
-    object_storage_filesystem = fs.S3FileSystem(
-        endpoint_override = os.environ['TIGRIS_ENDPOINT_S3'],
-        access_key        = os.environ['TIGRIS_ACCESS_KEY_ID'],
-        secret_key        = os.environ['TIGRIS_SECRET_ACCESS_KEY'],
-        scheme            = 'https'
-    )
-
-    reteti_index_compactor(
-        object_storage_filesystem,
-        os.environ['INDEX_BUCKET'],
-        'hashes',
-        'metadata'
-    )
-
-    processing_time = round((time() - processing_start))
-    processing_time_string = str(timedelta(seconds=processing_time))
-
-    message = f'Object storage index compacted for {processing_time_string}.'
-    print(message, flush=True)
-    logger.info(message)
-
-    # Get script runtime:
+    # Get the script runtime:
     script_time = round((time() - script_start))
     script_time_string = str(timedelta(seconds=script_time))
 
-    message = f'All batches processed for {script_time_string}.'
-    print(message, flush=True)
-    logger.info(message)
-
-    # Log the total number of texts:
-    message = f'Total texts: {str(texts_total)}'
-
+    message = f'Total script runtime: {script_time_string}.'
     print(message, flush=True)
     logger.info(message)
 
