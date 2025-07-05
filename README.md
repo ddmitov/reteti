@@ -1,10 +1,10 @@
+
+<img align="center" width="100" height="100" src="assets/giraffe_svgrepo_com.png">
+
 Reteti
 --------------------------------------------------------------------------------
 
-<img align="left" width="100" height="100" src="assets/giraffe_svgrepo_com.png">
-  
 Reteti is a lexical search experiment using partitioned index of hashed words in object storage.  
-  
 
 ## Design Objectives
 
