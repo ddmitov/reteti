@@ -13,7 +13,6 @@ from   dotenv       import load_dotenv
 from   fastapi      import FastAPI
 from   minio        import Minio
 import gradio       as     gr
-import stopwordsiso as stopwords
 import uvicorn
 
 # Reteti core module:
@@ -52,18 +51,14 @@ def text_searcher(
     index_bucket = os.environ['INDEX_BUCKET']
     texts_bucket = os.environ['TEXTS_BUCKET']
 
-    index_prefix = 'hashes'
+    index_prefix = 'index'
     texts_prefix = 'texts'
 
     # Use the global stopwords set:
     global stopword_set
 
     # Hash the search request:
-    request_hashing_start = time.time()
-
     hash_list = reteti_request_hasher(stopword_set, search_request)
-
-    request_hashing_time = round((time.time() - request_hashing_start), 3)
 
     # Read the hashed words index data:
     index_reading_start = time.time()
@@ -138,7 +133,6 @@ def text_searcher(
 
     total_time = round(
         (
-            request_hashing_time +
             index_reading_time   +
             search_time          +
             text_extraction_time
@@ -148,7 +142,6 @@ def text_searcher(
 
     info = {}
 
-    info['reteti_request_hasher() ........ runtime in seconds'] = request_hashing_time
     info['reteti_index_reader() .......... runtime in seconds'] = index_reading_time
 
     if len(hash_list) == 1:
@@ -217,7 +210,14 @@ def main():
 
     # Initialize a stopwords list:
     global stopword_set
-    stopword_set = stopwords.stopwords(['bg', 'en'])
+
+    with open('/home/reteti/stopwords-iso.json', 'r') as stopwords_json_file:
+        stopword_json_data = json.load(stopwords_json_file)
+
+        stopwords_bg = set(stopword_json_data['bg'])
+        stopwords_en = set(stopword_json_data['en'])
+
+        stopword_set = stopwords_bg | stopwords_en
 
     # Define Gradio user interface:
     request_box = gr.Textbox(lines=1, label='Search Request')

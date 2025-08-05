@@ -13,20 +13,18 @@ import shutil
 from   time     import time
 
 # Python PIP modules:
-from   datasets     import load_dataset
-from   dotenv       import find_dotenv
-from   dotenv       import load_dotenv
+from   datasets import load_dataset
+from   dotenv   import find_dotenv
+from   dotenv   import load_dotenv
 import duckdb
-from   minio        import Minio
-import stopwordsiso as stopwords
+from   minio    import Minio
 
 # Reteti core module:
-from reteti_core import reteti_indexer
+from reteti_core import reteti_binned_index_writer
 from reteti_core import reteti_index_formatter
-from reteti_core import reteti_file_uploader
 
 # Reteti supplementary module:
-from reteti_text import reteti_text_writer
+from reteti_text import reteti_text_uploader
 
 # Start the indexing process:
 # docker run --rm -it --user $(id -u):$(id -g) \
@@ -58,11 +56,11 @@ def logger_starter() -> logging.Logger:
 def main():
     YEAR = '2024'
 
-    FIRST_TABLE_NUMBER = 1
-    LAST_TABLE_NUMBER  = 200
-    TEXTS_PER_BATCH    = 25000
+    FIRST_DATASET_TABLE_NUMBER = 151
+    LAST_DATASET_TABLE_NUMBER  = 300
+    TEXTS_PER_DATASET_TABLE    = 25000
 
-    BINS_TOTAL = 100
+    BINS_TOTAL = 500
 
     # Start measuring runtime and set logging:
     script_start = time()
@@ -77,7 +75,15 @@ def main():
     )
 
     # Initialize a stopwords list:
-    stopword_set = stopwords.stopwords(['bg', 'en'])
+    stopword_set = None
+
+    with open('/home/reteti/stopwords-iso.json', 'r') as stopwords_json_file:
+        stopword_json_data = json.load(stopwords_json_file)
+
+        stopwords_bg = set(stopword_json_data['bg'])
+        stopwords_en = set(stopword_json_data['en'])
+
+        stopword_set = stopwords_bg | stopwords_en
 
     # Get the number of the already indexed texts:
     json_data = None
@@ -112,6 +118,9 @@ def main():
     print(message, flush=True)
     logger.info(message)
 
+    # Total number of texts from the current script run:
+    script_run_texts_total = 0
+
     # Set DuckDB sequence for the generation of text_id numbers:
     sequence_start = previous_texts_total + 1
 
@@ -129,17 +138,14 @@ def main():
 
     # Iterate the dataset:
     table_number = 0
-    script_run_texts_total = 0
 
-    for raw_table in dataset.iter(batch_size=TEXTS_PER_BATCH):
+    for dataset_table in dataset.iter(batch_size=TEXTS_PER_DATASET_TABLE):
         table_number += 1
 
         if (
-            table_number >= FIRST_TABLE_NUMBER and
-            table_number <= LAST_TABLE_NUMBER
+            table_number >= FIRST_DATASET_TABLE_NUMBER and
+            table_number <= LAST_DATASET_TABLE_NUMBER
         ):
-            step_start = time()
-
             # Prepare text data:
             batch_table = duckdb.sql(
                 f'''
@@ -148,7 +154,7 @@ def main():
                         title,
                         published_date AS date,
                         plain_text AS text
-                    FROM raw_table
+                    FROM dataset_table
                     WHERE language IN ('bg', 'en')
                 '''
             ).arrow()
@@ -162,8 +168,8 @@ def main():
             ).arrow().column('texts_total')[0].as_py()
 
             message = (
-                f'Batch {str(table_number)}/{str(LAST_TABLE_NUMBER)} - ' +
-                f'total texts: {str(batch_texts_total)}'
+                f'Batch {str(table_number)}/{str(LAST_DATASET_TABLE_NUMBER)} - ' +
+                f'texts: {str(batch_texts_total)}'
             )
 
             print(message, flush=True)
@@ -171,36 +177,18 @@ def main():
 
             script_run_texts_total += batch_texts_total
 
-            # Write local text files:
-            processing_start = time()
-
-            reteti_text_writer(batch_table, '/app/data/texts')
-
-            processing_time = round((time() - processing_start))
-            processing_time_string = str(timedelta(seconds=processing_time))
-
-            message = (
-                f'Batch {str(table_number)}/{str(LAST_TABLE_NUMBER)} - ' +
-                f'text files written for {processing_time_string}'
-            )
-
-            print(message, flush=True)
-            logger.info(message)
-
-            # Upload text files:
+            # Upload texts:
             processing_start = time()
 
             message_header = (
-                f'Batch {str(table_number)}/{str(LAST_TABLE_NUMBER)} - ' +
-                'text uploader core'
+                f'text batch {str(table_number)}/{str(LAST_DATASET_TABLE_NUMBER)}'
             )
 
-            reteti_file_uploader(
+            reteti_text_uploader(
                 object_storage_client,
                 os.environ['TEXTS_BUCKET'],
                 'texts',
-                '/app/data/texts',
-                'arrow',
+                batch_table,
                 message_header
             )
 
@@ -208,24 +196,8 @@ def main():
             processing_time_string = str(timedelta(seconds=processing_time))
 
             message = (
-                f'Batch {str(table_number)}/{str(LAST_TABLE_NUMBER)} - ' +
-                f'text files uploaded for {processing_time_string}'
-            )
-
-            print(message, flush=True)
-            logger.info(message)
-
-            # Remove local text files:
-            processing_start = time()
-
-            shutil.rmtree('/app/data/texts', ignore_errors=True)
-
-            processing_time = round((time() - processing_start))
-            processing_time_string = str(timedelta(seconds=processing_time))
-
-            message = (
-                f'Batch {str(table_number)}/{str(LAST_TABLE_NUMBER)} - ' +
-                f'text files removed for {processing_time_string}'
+                f'Batch {str(table_number)}/{str(LAST_DATASET_TABLE_NUMBER)} - ' +
+                f'texts uploaded for {processing_time_string}'
             )
 
             print(message, flush=True)
@@ -236,10 +208,11 @@ def main():
 
             batch_table.drop_columns(['title', 'date'])
 
-            reteti_indexer(
+            reteti_binned_index_writer(
                 BINS_TOTAL,
                 batch_table,
                 '/app/data/binned_index',
+                '/app/data/binned_index_metadata',
                 stopword_set
             )
 
@@ -247,26 +220,14 @@ def main():
             processing_time_string = str(timedelta(seconds=processing_time))
 
             message = (
-                f'Batch {str(table_number)}/{str(LAST_TABLE_NUMBER)} - ' +
-                f'index files created for {processing_time_string}'
+                f'Batch {str(table_number)}/{str(LAST_DATASET_TABLE_NUMBER)} - ' +
+                f'binned index created for {processing_time_string}'
             )
 
             print(message, flush=True)
             logger.info(message)
 
-            # Calculate and log the runtime of the current batch:
-            step_time = round((time() - step_start))
-            step_time_string = str(timedelta(seconds=step_time))
-
-            message = (
-                f'Batch {str(table_number)}/{str(LAST_TABLE_NUMBER)} - ' +
-                f'processed for {step_time_string}'
-            )
-
-            print(message, flush=True)
-            logger.info(message)
-
-        if table_number == LAST_TABLE_NUMBER:
+        if table_number == LAST_DATASET_TABLE_NUMBER:
             break
 
         # Garbage collection:
@@ -276,47 +237,19 @@ def main():
     processing_start = time()
 
     reteti_index_formatter(
+        object_storage_client,
+        os.environ['INDEX_BUCKET'],
+        'index',
         BINS_TOTAL,
         generation_timestamp,
         '/app/data/binned_index',
-        '/app/data/index'
+        '/app/data/binned_index_metadata'
     )
 
     processing_time = round((time() - processing_start))
     processing_time_string = str(timedelta(seconds=processing_time))
 
     message = f'Index formatted for {processing_time_string}.'
-    print(message, flush=True)
-    logger.info(message)
-
-    # Upload formatted index files:
-    processing_start = time()
-
-    reteti_file_uploader(
-        object_storage_client,
-        os.environ['INDEX_BUCKET'],
-        'index',
-        '/app/data/index',
-        'arrow',
-        'Index uploader core'
-    )
-
-    processing_time = round((time() - processing_start))
-    processing_time_string = str(timedelta(seconds=processing_time))
-    message = (f'Index uploaded for {processing_time_string}')
-
-    print(message, flush=True)
-    logger.info(message)
-
-    # Remove all formatted index files:
-    processing_start = time()
-
-    shutil.rmtree('/app/data/index', ignore_errors=True)
-
-    processing_time = round((time() - processing_start))
-    processing_time_string = str(timedelta(seconds=processing_time))
-    message = (f'Index removed for {processing_time_string}')
-
     print(message, flush=True)
     logger.info(message)
 

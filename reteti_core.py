@@ -7,15 +7,14 @@ import io
 from   multiprocessing      import cpu_count
 from   multiprocessing.pool import ThreadPool
 import os
-from   pathlib              import Path
 from   typing               import List
 
 # Python PIP modules:
 import duckdb
 from   minio           import Minio
 import pyarrow         as pa
-import pyarrow.dataset as ds
 import pyarrow.fs      as fs
+import pyarrow.parquet as pq
 from   tokenizers      import normalizers
 from   tokenizers      import pre_tokenizers
 
@@ -38,10 +37,11 @@ def reteti_list_splitter(
     return result
 
 
-def reteti_indexer(
+def reteti_binned_index_writer(
     bins_total:           int,
     text_table:           pa.Table,
     index_base_directory: str,
+    metadata_directory:   str,
     stopword_set:         set
 ) -> True:
     # Extract the 'text_id' and 'text' Arrow table columns as lists:
@@ -88,7 +88,7 @@ def reteti_indexer(
     # Iterate all texts in a batch:
     for text_id, word_list in zip(text_id_list, words_batch):
         hash_list = [
-            hashlib.blake2b(word.encode(), digest_size=64).hexdigest()
+            hashlib.blake2b(word.encode(), digest_size=32).hexdigest()
             for word in word_list
             if word not in stopword_set
         ]
@@ -121,11 +121,11 @@ def reteti_indexer(
 
     hash_table = duckdb.sql(
         '''
-            SELECT
-                CURRENT_TIMESTAMP AS generation_timestamp,
-                *
+            SELECT *
             FROM hash_table
-            ORDER BY bin
+            ORDER BY
+                bin,
+                hash
         '''
     ).arrow()
 
@@ -133,13 +133,35 @@ def reteti_indexer(
 
     os.makedirs(index_base_directory, exist_ok=True)
 
-    ds.write_dataset(
+    pq.write_to_dataset(
         hash_table,
-        format                 = 'arrow',
         filesystem             = fs.LocalFileSystem(),
-        base_dir               = index_base_directory,
+        root_path              = index_base_directory,
         partitioning           = ['bin'],
-        basename_template      = 'part-{{i}}--{}.arrow'.format(diff_string),
+        basename_template      = 'part-{{i}}--{}.parquet'.format(diff_string),
+        existing_data_behavior = 'overwrite_or_ignore',
+        max_partitions         = bins_total
+    )
+
+    metadata_table = duckdb.sql(
+        '''
+            SELECT
+                bin,
+                hash,
+                CURRENT_TIMESTAMP AS generation_timestamp
+            FROM hash_table
+            GROUP BY
+                bin,
+                hash
+        '''
+    ).arrow()
+
+    pq.write_to_dataset(
+        metadata_table,
+        filesystem             = fs.LocalFileSystem(),
+        root_path              = metadata_directory,
+        partitioning           = ['bin'],
+        basename_template      = 'part-{{i}}--{}.parquet'.format(diff_string),
         existing_data_behavior = 'overwrite_or_ignore',
         max_partitions         = bins_total
     )
@@ -148,30 +170,39 @@ def reteti_indexer(
 
 
 def reteti_index_formatter(
+    object_storage_client:  Minio,
+    bucket_name:            str,
+    prefix:                 str,
     bins_total:             int,
     generation_timestamp:   datetime,
     binned_index_directory: str,
-    index_directory:        str
+    metadata_directory:     str
 ) -> True:
-    bin_list = list(range(1, bins_total))
+    bin_list = list(range(1, bins_total + 1))
 
     for bin_number in bin_list:
-        bin_table = ds.dataset(
-            f'{binned_index_directory}/{bin_number}',
-            format     = 'arrow',
+        metadata_table = pq.ParquetDataset(
+            f'{metadata_directory}/{bin_number}',
             filesystem = fs.LocalFileSystem()
-        ).to_table()
+        ).read()
 
-        hashes_table = duckdb.query(
+        filter_timestamp = generation_timestamp.isoformat()
+
+        hash_list = duckdb.query(
             f'''
                 SELECT hash
-                FROM bin_table
-                WHERE generation_timestamp > '{generation_timestamp.isoformat()}'
+                FROM metadata_table
+                WHERE generation_timestamp > '{filter_timestamp}'
                 GROUP BY hash
             '''
-        ).arrow()
+        ).arrow().column('hash').to_pylist()
 
-        hash_list = hashes_table.column('hash').to_pylist()
+        bin_table = pq.ParquetDataset(
+            f'{binned_index_directory}/{bin_number}',
+            filesystem = fs.LocalFileSystem()
+        ).read()
+
+        hash_table_list = []
 
         if len(hash_list) > 0:
             hash_number = 0
@@ -190,103 +221,86 @@ def reteti_index_formatter(
                     '''
                 ).arrow()
 
-                os.makedirs(
-                    f'{index_directory}/{hash_item}',
-                    exist_ok=True
-                )
+                hash_table_list.append(hash_table)
 
-                with pa.OSFile(
-                    f'{index_directory}/{hash_item}/data.arrow',
-                    'wb'
-                ) as sink:
-                    writer = pa.RecordBatchFileWriter(sink, hash_table.schema)
-                    writer.write_table(hash_table)
-                    writer.close()
-
-                message = (
-                    f'Bin {str(bin_number)}/{str(bins_total)} - ' +
-                    f'{str(hash_number)}/{str(len(hash_list))} - ' +
-                    f'{hash_item}'
-                )
-
-                print(message, flush=True)
-
-    return True
-
-
-def reteti_file_uploader(
-    object_storage_client: Minio,
-    bucket_name:           str,
-    prefix:                str,
-    directory:             str,
-    file_extension:        str,
-    message_header:        str
-) -> True:
-    file_paths = list(Path(directory).rglob(f'*.{file_extension}'))
-    file_paths_batch_list = reteti_list_splitter(file_paths, cpu_count())
-
-    thread_pool = ThreadPool(cpu_count())
-
-    file_uploader_worker_arguments = [
-        (
-            object_storage_client,
-            bucket_name,
-            prefix,
-            directory,
-            file_paths_batch,
-            core_number,
-            message_header
+        hash_batch_list = reteti_list_splitter(
+            hash_list,
+            cpu_count()
         )
-        for file_paths_batch, core_number in zip(
-            file_paths_batch_list,
-            range(cpu_count())
+
+        hash_table_batch_list = reteti_list_splitter(
+            hash_table_list,
+            cpu_count()
         )
-    ]
 
-    result = thread_pool.starmap_async(
-        reteti_file_uploader_worker,
-        file_uploader_worker_arguments
-    )
-
-    result.get()
-
-    return True
-
-
-def reteti_file_uploader_worker(
-    object_storage_client: Minio,
-    bucket_name:           str,
-    prefix:                str,
-    directory:             str,
-    file_paths_batch:      list,
-    core_number:           int,
-    message_header:        str
-) -> True:
-    file_number = 0
-
-    for file_path in file_paths_batch:
-        file_number += 1
-
-        object_name = str(file_path).replace(f'{directory}/', '')
-
-        try:
-            object_storage_client.fput_object(
+        index_uploader_arguments = [
+            (
+                object_storage_client,
                 bucket_name,
-                prefix + '/' + object_name,
-                file_path,
-                part_size = 100 * 1024 * 1024 # 100 MB
+                prefix,
+                hash_batch,
+                hash_table_batch,
+                bin_number,
+                len(bin_list),
+                core_number
             )
-
-            message = (
-                f'{message_header} {str(core_number)} ' +
-                f'{str(file_number)}/{str(len(file_paths_batch))} - ' +
-                f'{object_name}'
+            for hash_batch, hash_table_batch, core_number in zip(
+                hash_batch_list,
+                hash_table_batch_list,
+                range(cpu_count())
             )
+        ]
 
-            print(message, flush=True)
+        thread_pool = ThreadPool(cpu_count())
 
-        except Exception as exception:
-            print(exception, flush=True)
+        result = thread_pool.starmap_async(
+            reteti_index_uploader,
+            index_uploader_arguments
+        )
+
+        result.get()
+
+    return True
+
+
+def reteti_index_uploader(
+    object_storage_client: Minio,
+    bucket_name:           str,
+    prefix:                str,
+    hash_batch:            list,
+    hash_table_batch:      list,
+    bin_number:            int,
+    bins_total:            int,
+    core_number:           int
+) -> True:
+    hash_number = 0
+
+    for hash_item, hash_table in zip(hash_batch, hash_table_batch):
+        hash_number += 1
+
+        buffer = io.BytesIO()
+
+        with pa.ipc.new_file(buffer, hash_table.schema) as writer:
+            writer.write_table(hash_table)
+
+        buffer.seek(0)
+
+        object_storage_client.put_object(
+            bucket_name  = bucket_name,
+            object_name  = f'{prefix}/{str(hash_item)}/data.arrow',
+            data         = buffer,
+            length       = len(buffer.getvalue()),
+            content_type = 'application/octet-stream'
+        )
+
+        message = (
+            f'index uploader ' +
+            f'bin {str(bin_number)}/{str(bins_total)} ' +
+            f'core {str(core_number)} ' +
+            f'hash {str(hash_number)}/{str(len(hash_batch))}'
+        )
+
+        print(message, flush=True)
 
     return True
 
@@ -314,12 +328,7 @@ def reteti_request_hasher(stopword_set: set, search_request: str) -> list:
         pre_tokenizer.pre_tokenize_str(normalized_search_request)
 
     hash_list = [
-        str(
-            hashlib.blake2b(
-                word_tuple[0].encode(),
-                digest_size=64
-            ).hexdigest()
-        )
+        hashlib.blake2b(word_tuple[0].encode(), digest_size=32).hexdigest()
         for word_tuple in pre_tokenized_search_request
         if word_tuple[0] not in stopword_set
     ]
@@ -387,11 +396,11 @@ def reteti_index_reader_worker(
             f'{index_prefix}/{hash_item}/data.arrow'
         )
 
-        arrow_buffer = io.BytesIO(remote_response.read())
+        arrow_buffer   = io.BytesIO(remote_response.read())
         raw_hash_table = pa.ipc.open_file(arrow_buffer).read_all()
 
         alias_array = pa.array([hash_alias] * raw_hash_table.num_rows)
-        hash_table = raw_hash_table.add_column(0, 'alias', alias_array)
+        hash_table  = raw_hash_table.add_column(0, 'alias', alias_array)
     except FileNotFoundError:
         pass
 

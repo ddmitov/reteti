@@ -10,17 +10,16 @@ Reteti is a lexical search experiment using partitioned index of hashed words in
 
 * **1.** Fast lexical search with index data based entirely on object storage
 * **2.** Usability in serverless or scale-to-zero applications for scalability and cost control
-* **3.** Adaptability to different cloud environments or on-premise systems
 
 ## Features
 
-- [x] All index data is stored only in object storage.
+- [x] Final index is stored only in object storage.
 
-- [x] Reteti is language-agnostic and does not use language-specific stemmers.
+- [x] Reteti is language-agnostic and is not limited to predefined languages.
 
 - [x] Storage and compute are decoupled and Reteti can be used in serverless functions.
 
-- [x] The index and text locations are independent from one another.
+- [x] The index and text locations are independent from one another, texts may live in a different system.
 
 ## Workflow
 
